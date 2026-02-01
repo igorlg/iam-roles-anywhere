@@ -1,0 +1,33 @@
+[project]
+name = "iam-ra-cli"
+version = "0.1.0"
+description = "CLI for managing IAM Roles Anywhere infrastructure"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1.0",
+    "boto3>=1.34.0",
+    "rich>=13.0.0",
+    "pyyaml>=6.0.0",
+    "aws-sam-cli>=1.150.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "moto>=5.0.0",
+]
+
+[project.scripts]
+iam-ra = "iam_ra_cli.main:cli"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+iam_ra_cli = ["data/**/*"]
