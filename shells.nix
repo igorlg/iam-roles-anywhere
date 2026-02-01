@@ -6,6 +6,7 @@
 # - Nix formatting/linting tools
 # - AWS CLI and tools
 # - Certificate management tools
+# - just for task running
 {
   lib,
   nixpkgs,
@@ -30,6 +31,9 @@ forAllSystems (
         virtualenv
         pkgs.uv
 
+        # Task runner
+        pkgs.just
+
         # Nix tools
         pkgs.nixfmt
         pkgs.statix
@@ -39,6 +43,9 @@ forAllSystems (
         pkgs.awscli2
         pkgs.aws-signing-helper
         pkgs.aws-sam-cli
+
+        # CloudFormation linting
+        pkgs.cfn-lint
 
         # Certificate tools
         pkgs.openssl
@@ -60,18 +67,7 @@ forAllSystems (
 
         echo "IAM Roles Anywhere development shell"
         echo ""
-        echo "Python deps from: iam-ra-cli/pyproject.toml + uv.lock"
-        echo ""
-        echo "Structure:"
-        echo "  modules/credentials.nix  - Core home-manager module"
-        echo "  modules/nixos.nix        - NixOS wrapper"
-        echo "  iam-ra-cli/              - Python CLI (deps from pyproject.toml)"
-        echo "  cloudformation/          - SAM templates"
-        echo ""
-        echo "Commands:"
-        echo "  uv add <package>         - Add Python dependency"
-        echo "  uv lock                  - Update uv.lock"
-        echo "  iam-ra --help            - CLI usage"
+        echo "Run 'just' to see available commands"
         echo ""
       '';
     };

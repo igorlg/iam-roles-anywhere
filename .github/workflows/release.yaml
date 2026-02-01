@@ -1,0 +1,64 @@
+# Release - Version bump and artifact generation on main
+#
+# Triggered when PRs are merged to main.
+# Uses conventional commits to determine version bump.
+# Creates GitHub releases with built artifacts.
+
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      # Use release-please for conventional commit based releases
+      - name: Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          release-type: simple
+          package-name: iam-roles-anywhere
+
+      # Build artifacts only if a release was created
+      - name: Build CLI (x86_64-linux)
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          nix build .#iam-ra-cli --print-build-logs
+          cp -L result/bin/iam-ra iam-ra-x86_64-linux
+          chmod +x iam-ra-x86_64-linux
+
+      - name: Upload Release Artifacts
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ steps.release.outputs.tag_name }} \
+            iam-ra-x86_64-linux \
+            --clobber
+
+      # Output release info for downstream jobs
+      - name: Release Info
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          echo "Release created: ${{ steps.release.outputs.tag_name }}"
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag_name }}"
