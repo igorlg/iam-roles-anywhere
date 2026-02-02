@@ -2,7 +2,12 @@
 #
 # Triggered when PRs are merged to main.
 # Uses conventional commits to determine version bump.
-# Creates GitHub releases with built artifacts.
+# Creates GitHub releases and publishes to FlakeHub.
+#
+# Version tracking:
+#   - VERSION file: single source of truth
+#   - iam-ra-cli/pyproject.toml: updated by release-please
+#   - Both are kept in sync automatically
 
 name: Release
 
@@ -14,16 +19,45 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  id-token: write  # Required for FlakeHub
 
 jobs:
-  release:
-    name: Release
+  release-please:
+    name: Release Please
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Build and verify on Linux (both architectures)
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
@@ -31,34 +65,88 @@ jobs:
       - name: Setup Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@main
 
-      # Use release-please for conventional commit based releases
-      - name: Release Please
-        id: release
-        uses: googleapis/release-please-action@v4
+      - name: Build CLI
+        run: nix build .#iam-ra-cli --print-build-logs
+
+      - name: Verify CLI runs
+        run: |
+          ./result/bin/iam-ra --version
+          ./result/bin/iam-ra --help
+
+      # Note: The Nix-built CLI is NOT a standalone binary.
+      # It's a wrapper script that requires Nix store paths.
+      # Users should install via: nix run github:owner/iam-roles-anywhere#iam-ra-cli
+      # or add to their flake inputs.
+      #
+      # For standalone binaries, we would need PyInstaller/Nuitka,
+      # which is out of scope for now.
+
+  # Placeholder for Darwin builds (requires self-hosted runners or macOS runners)
+  build-darwin:
+    name: Build Darwin (${{ matrix.arch }})
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest  # Placeholder - would need macos-latest or self-hosted
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Darwin build placeholder
+        run: |
+          echo "Darwin builds require macOS runners or cross-compilation."
+          echo "For now, Darwin users should install via Nix:"
+          echo "  nix run github:owner/iam-roles-anywhere#iam-ra-cli"
+          echo ""
+          echo "To enable Darwin builds:"
+          echo "  1. Use macos-latest runners (x86_64 only)"
+          echo "  2. Use self-hosted aarch64-darwin runners"
+          echo "  3. Or implement cross-compilation"
+
+  # Publish to FlakeHub
+  flakehub:
+    name: Publish to FlakeHub
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          release-type: simple
-          package-name: iam-roles-anywhere
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
-      # Build artifacts only if a release was created
-      - name: Build CLI (x86_64-linux)
-        if: ${{ steps.release.outputs.release_created }}
-        run: |
-          nix build .#iam-ra-cli --print-build-logs
-          cp -L result/bin/iam-ra iam-ra-x86_64-linux
-          chmod +x iam-ra-x86_64-linux
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Upload Release Artifacts
-        if: ${{ steps.release.outputs.release_created }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload ${{ steps.release.outputs.tag_name }} \
-            iam-ra-x86_64-linux \
-            --clobber
+      - name: Publish to FlakeHub
+        uses: DeterminateSystems/flakehub-push@main
+        with:
+          visibility: public
+          tag: ${{ needs.release-please.outputs.tag_name }}
 
-      # Output release info for downstream jobs
-      - name: Release Info
-        if: ${{ steps.release.outputs.release_created }}
+  # Create release summary
+  release-summary:
+    name: Release Summary
+    needs: [release-please, build-linux, flakehub]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
         run: |
-          echo "Release created: ${{ steps.release.outputs.tag_name }}"
-          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag_name }}"
+          echo "## Release ${{ needs.release-please.outputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Installation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Via Nix (recommended):**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "nix run github:${{ github.repository }}#iam-ra-cli -- --help" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Via FlakeHub:**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "nix run flakehub:${{ github.repository }}#iam-ra-cli -- --help" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**As flake input:**" >> $GITHUB_STEP_SUMMARY
+          echo '```nix' >> $GITHUB_STEP_SUMMARY
+          echo 'inputs.iam-roles-anywhere.url = "github:${{ github.repository }}/${{ needs.release-please.outputs.tag_name }}";' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
