@@ -82,9 +82,7 @@ rec {
   # ===================
 
   # Generic ARN validation (less specific than the typed validators)
-  isValidArn =
-    arn:
-    builtins.match "arn:aws[a-z-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]*:.+" arn != null;
+  isValidArn = arn: builtins.match "arn:aws[a-z-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]*:.+" arn != null;
 
   # ===================
   # ARN PARSING HELPERS

@@ -42,7 +42,6 @@ forAllSystems (
         # AWS tools
         pkgs.awscli2
         pkgs.aws-signing-helper
-        pkgs.aws-sam-cli
 
         # CloudFormation linting (Python package)
         pkgs.python3Packages.cfn-lint

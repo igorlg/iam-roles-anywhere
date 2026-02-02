@@ -2,7 +2,11 @@
 #
 # Configures programs.awscli.settings with the credential_process command.
 # This is a pure function that takes config values and returns a config fragment.
-{ lib, cfg, credentialProcessCommand }:
+{
+  lib,
+  cfg,
+  credentialProcessCommand,
+}:
 
 let
   # Base profile configuration
@@ -10,7 +14,8 @@ let
     credential_process = credentialProcessCommand;
     region = cfg.aws.region;
     output = cfg.awsProfile.output;
-  } // cfg.awsProfile.extraConfig;
+  }
+  // cfg.awsProfile.extraConfig;
 
   # Named profile (e.g., "profile iam-ra")
   namedProfile = {

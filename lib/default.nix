@@ -54,13 +54,11 @@ rec {
 
   # Validate trust anchor ARN format
   isValidTrustAnchorArn =
-    arn:
-    builtins.match "arn:aws:rolesanywhere:[a-z0-9-]+:[0-9]+:trust-anchor/[a-f0-9-]+" arn != null;
+    arn: builtins.match "arn:aws:rolesanywhere:[a-z0-9-]+:[0-9]+:trust-anchor/[a-f0-9-]+" arn != null;
 
   # Validate profile ARN format
   isValidProfileArn =
-    arn:
-    builtins.match "arn:aws:rolesanywhere:[a-z0-9-]+:[0-9]+:profile/[a-f0-9-]+" arn != null;
+    arn: builtins.match "arn:aws:rolesanywhere:[a-z0-9-]+:[0-9]+:profile/[a-f0-9-]+" arn != null;
 
   # Validate IAM role ARN format
   isValidRoleArn = arn: builtins.match "arn:aws:iam::[0-9]+:role/.+" arn != null;

@@ -9,7 +9,6 @@ dependencies = [
     "boto3>=1.34.0",
     "rich>=13.0.0",
     "pyyaml>=6.0.0",
-    "aws-sam-cli>=1.150.0",
 ]
 
 [dependency-groups]

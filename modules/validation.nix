@@ -3,7 +3,11 @@
 # ARN validation assertions and configuration warnings.
 # This is a pure function that takes config values and lib functions,
 # returning assertions and warnings for the module.
-{ lib, cfg, iamRaLib }:
+{
+  lib,
+  cfg,
+  iamRaLib,
+}:
 
 {
   assertions = [
@@ -23,8 +27,10 @@
 
   warnings =
     [ ]
-    ++ lib.optional (cfg.awsProfile.name == "default" && !cfg.awsProfile.makeDefault)
-      "programs.iamRolesAnywhere: Profile name is 'default' but makeDefault is false. Consider setting makeDefault = true."
-    ++ lib.optional (cfg.aws.sessionDuration != null && cfg.aws.sessionDuration < 900)
-      "programs.iamRolesAnywhere: Session duration less than 900 seconds may cause issues.";
+    ++
+      lib.optional (cfg.awsProfile.name == "default" && !cfg.awsProfile.makeDefault)
+        "programs.iamRolesAnywhere: Profile name is 'default' but makeDefault is false. Consider setting makeDefault = true."
+    ++ lib.optional (
+      cfg.aws.sessionDuration != null && cfg.aws.sessionDuration < 900
+    ) "programs.iamRolesAnywhere: Session duration less than 900 seconds may cause issues.";
 }
