@@ -1,0 +1,312 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: IAM Roles Anywhere - Root CA Stack
+
+Parameters:
+  PCAArn:
+    Type: String
+    Default: self-managed
+    Description: |
+      Certificate Authority source (determines mode):
+      - "self-managed": Lambda generates self-signed CA (recommended for <40 hosts)
+      - "" (empty): Create new ACM Private CA ($400/month)
+      - "<arn>": Use existing ACM Private CA at specified ARN
+
+  CAValidityYears:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 30
+    Description: CA certificate validity in years (self-managed and pca-create modes)
+
+  PCAKeyAlgorithm:
+    Type: String
+    Default: EC_prime256v1
+    AllowedValues:
+      - EC_prime256v1
+      - EC_secp384r1
+      - RSA_2048
+      - RSA_4096
+    Description: Key algorithm for ACM Private CA (pca-create mode only)
+
+  PCASubjectCountry:
+    Type: String
+    Default: AU
+    MaxLength: 2
+    Description: CA certificate subject country code (pca-create mode only)
+
+  PCASubjectOrganization:
+    Type: String
+    Default: IgorLG
+    MaxLength: 64
+    Description: CA certificate subject organization (pca-create mode only)
+
+  PCASubjectCommonName:
+    Type: String
+    Default: IAMRoles
+    MaxLength: 64
+    Description: CA certificate subject common name (pca-create mode only)
+
+  SSMPrefix:
+    Type: String
+    Default: /iam-ra
+    Description: SSM Parameter Store prefix for outputs
+
+Outputs:
+  CAMode:
+    Description: Certificate Authority mode (derived from PCAArn)
+    Value: !If
+      - UseSelfManagedCA
+      - "self-managed"
+      - !If
+        - CreatePCA
+        - "pca-create"
+        - "pca-existing"
+
+  CAModeParameterName:
+    Description: SSM Parameter name for CA Mode
+    Value: !Sub "${SSMPrefix}/ca-mode"
+
+  PCAArnParameterName:
+    Description: SSM Parameter name for PCA ARN (PCA modes only)
+    Condition: UsePCA
+    Value: !Sub "${SSMPrefix}/pca-arn"
+
+  PCAArn:
+    Description: ACM Private CA ARN (PCA modes only)
+    Condition: UsePCA
+    Value: !If [CreatePCA, !Ref PrivateCA, !Ref PCAArn]
+
+  CACertificateParameterName:
+    Description: SSM Parameter name for CA Certificate (self-managed mode only)
+    Condition: UseSelfManagedCA
+    Value: !Sub "${SSMPrefix}/ca-certificate"
+
+  CAPrivateKeySecretArn:
+    Description: Secrets Manager ARN for CA Private Key (self-managed mode only)
+    Condition: UseSelfManagedCA
+    Value: !Ref CAPrivateKeySecret
+
+  CAGeneratorFunctionArn:
+    Description: ARN of the CA Generator Lambda function (self-managed mode only)
+    Condition: UseSelfManagedCA
+    Value: !GetAtt CAGeneratorFunction.Arn
+
+  PrivateCACertificateArn:
+    Description: ARN of the Root CA Certificate (pca-create mode only)
+    Condition: CreatePCA
+    Value: !Ref PrivateCACertificate
+
+  NextSteps:
+    Description: Next steps after deployment
+    Value: !Sub
+      - |
+        ======================================================================
+        ROOT CA STACK DEPLOYED - ${DerivedMode} mode
+        ======================================================================
+
+        CA Mode: ${DerivedMode}
+        PCAArn: ${PCAArn}
+        SSM Prefix: ${SSMPrefix}
+
+        Next: Deploy the IAM Roles Anywhere stack:
+
+          sam build --config-env iamra
+          sam deploy --config-env iamra
+
+        The iamra stack will read CA configuration from SSM parameters.
+        ======================================================================
+      - DerivedMode: !If
+          - UseSelfManagedCA
+          - "self-managed"
+          - !If
+            - CreatePCA
+            - "pca-create"
+            - "pca-existing"
+
+Conditions:
+  # Mode derived from PCAArn value:
+  # - "self-managed" -> UseSelfManagedCA
+  # - "" (empty) -> CreatePCA
+  # - anything else -> UseExistingPCA (actual ARN)
+  UseSelfManagedCA: !Equals [!Ref PCAArn, "self-managed"]
+  CreatePCA: !Equals [!Ref PCAArn, ""]
+  UseExistingPCA: !And
+    - !Not [!Equals [!Ref PCAArn, "self-managed"]]
+    - !Not [!Equals [!Ref PCAArn, ""]]
+  UsePCA: !Or
+    - !Condition CreatePCA
+    - !Condition UseExistingPCA
+  UseECKey: !Or
+    - !Equals [!Ref PCAKeyAlgorithm, "EC_prime256v1"]
+    - !Equals [!Ref PCAKeyAlgorithm, "EC_secp384r1"]
+
+Resources:
+  # ===========================================
+  # Self-Managed CA (Lambda-generated)
+  # ===========================================
+
+  CAGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-ca-generator"
+      Description: Generates self-managed CA for IAM Roles Anywhere
+      CodeUri: ca_generator/
+      Handler: app.lambda_handler
+      # No AWS permissions needed - Lambda only generates cryptographic material
+
+  CAGeneratorCustomResource:
+    Type: Custom::CAGenerator
+    Condition: UseSelfManagedCA
+    Properties:
+      ServiceToken: !GetAtt CAGeneratorFunction.Arn
+      ValidityYears: !Ref CAValidityYears
+
+  # ===========================================
+  # Self-Managed CA - Secrets and Parameters
+  # Created by CloudFormation using Lambda output
+  # ===========================================
+
+  CAPrivateKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: UseSelfManagedCA
+    Properties:
+      Name: !Sub "${SSMPrefix}/ca-private-key"
+      Description: IAM Roles Anywhere self-managed CA private key (crown jewels)
+      SecretString: !GetAtt CAGeneratorCustomResource.CAPrivateKey
+
+  CACertificateParameter:
+    Type: AWS::SSM::Parameter
+    Condition: UseSelfManagedCA
+    Properties:
+      Name: !Sub "${SSMPrefix}/ca-certificate"
+      Type: String
+      Value: !GetAtt CAGeneratorCustomResource.CACertificate
+      Description: IAM Roles Anywhere self-managed CA certificate (public)
+
+  # ===========================================
+  # ACM Private CA (Created by this stack)
+  # ===========================================
+
+  PrivateCA:
+    Type: AWS::ACMPCA::CertificateAuthority
+    Condition: CreatePCA
+    Properties:
+      Type: ROOT
+      KeyAlgorithm: !Ref PCAKeyAlgorithm
+      SigningAlgorithm: !If
+        - UseECKey
+        - SHA256WITHECDSA
+        - SHA256WITHRSA
+      Subject:
+        Country: !Ref PCASubjectCountry
+        Organization: !Ref PCASubjectOrganization
+        CommonName: !Ref PCASubjectCommonName
+      RevocationConfiguration:
+        CrlConfiguration:
+          Enabled: false
+
+  PrivateCACertificate:
+    Type: AWS::ACMPCA::Certificate
+    Condition: CreatePCA
+    Properties:
+      CertificateAuthorityArn: !Ref PrivateCA
+      CertificateSigningRequest: !GetAtt PrivateCA.CertificateSigningRequest
+      SigningAlgorithm: !If
+        - UseECKey
+        - SHA256WITHECDSA
+        - SHA256WITHRSA
+      TemplateArn: arn:aws:acm-pca:::template/RootCACertificate/V1
+      Validity:
+        Type: YEARS
+        Value: !Ref CAValidityYears
+
+  PrivateCAActivation:
+    Type: AWS::ACMPCA::CertificateAuthorityActivation
+    Condition: CreatePCA
+    Properties:
+      CertificateAuthorityArn: !Ref PrivateCA
+      Certificate: !GetAtt PrivateCACertificate.Certificate
+      Status: ACTIVE
+
+  # ===========================================
+  # SSM Parameters - CA Configuration Output
+  # ===========================================
+
+  CAModeParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "${SSMPrefix}/ca-mode"
+      Description: IAM Roles Anywhere CA Mode (derived from PCAArn)
+      Type: String
+      Value: !If
+        - UseSelfManagedCA
+        - "self-managed"
+        - !If
+          - CreatePCA
+          - "pca-create"
+          - "pca-existing"
+
+  # PCA ARN parameter - created in ALL modes for SSM parameter resolution
+  # In self-managed mode, contains placeholder value
+  PCAArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub "${SSMPrefix}/pca-arn"
+      Description:
+        !If [
+          UsePCA,
+          "ACM Private CA ARN",
+          "Placeholder (not used in self-managed mode)",
+        ]
+      Value: !If
+        - CreatePCA
+        - !Ref PrivateCA
+        - !If [UseExistingPCA, !Ref PCAArn, "NOT_USED_IN_SELF_MANAGED_MODE"]
+
+  # CA Certificate placeholder - only for PCA modes (for SSM parameter resolution)
+  # In self-managed mode: CACertificateParameter (above) has the actual certificate
+  CACertificatePlaceholderParameter:
+    Type: AWS::SSM::Parameter
+    Condition: UsePCA
+    Properties:
+      Type: String
+      Name: !Sub "${SSMPrefix}/ca-certificate"
+      Description: Placeholder (not used in PCA mode - Trust Anchor references PCA directly)
+      Value: "NOT_USED_IN_PCA_MODE"
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 256
+    Runtime: python3.13
+    Architectures:
+      - arm64
+    LoggingConfig:
+      LogFormat: JSON
+    Tags:
+      Purpose: IAM-Roles-Anywhere
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Certificate Authority Source
+        Parameters:
+          - PCAArn
+      - Label:
+          default: CA Certificate Settings
+        Parameters:
+          - CAValidityYears
+      - Label:
+          default: ACM Private CA Settings (pca-create mode)
+        Parameters:
+          - PCAKeyAlgorithm
+          - PCASubjectCountry
+          - PCASubjectOrganization
+          - PCASubjectCommonName
+      - Label:
+          default: Output Configuration
+        Parameters:
+          - SSMPrefix

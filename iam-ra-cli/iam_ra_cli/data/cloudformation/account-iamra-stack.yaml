@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: IAM Roles Anywhere - Account Stack
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  SSMPrefix:
+    Type: String
+    Default: /iam-ra
+    Description: SSM Parameter Store prefix (must match rootca stack)
+
+  # Dynamic SSM parameter references
+  # These resolve to the values stored by the rootca stack
+
+  CAMode:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /iam-ra/ca-mode
+    Description: SSM Parameter containing the CA mode (from rootca stack)
+
+  PCAArn:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /iam-ra/pca-arn
+    Description: |
+      SSM Parameter containing the PCA ARN.
+      Used when CAMode is pca-create or pca-existing.
+      Default: /iam-ra/pca-arn (created by rootca stack)
+
+  CACertificate:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /iam-ra/ca-certificate
+    Description: |
+      SSM Parameter containing the CA certificate PEM.
+      Used when CAMode is self-managed.
+      Default: /iam-ra/ca-certificate (created by rootca stack)
+
+Conditions:
+  UseSelfManagedCA: !Equals [!Ref CAMode, "self-managed"]
+  UsePCA: !Or
+    - !Equals [!Ref CAMode, "pca-create"]
+    - !Equals [!Ref CAMode, "pca-existing"]
+
+Resources:
+  # ===========================================
+  # Trust Anchor
+  # ===========================================
+
+  TrustAnchor:
+    Type: AWS::RolesAnywhere::TrustAnchor
+    Properties:
+      Name: !Sub "${AWS::StackName}-trust-anchor"
+      Enabled: true
+      Source: !If
+        - UseSelfManagedCA
+        - SourceType: CERTIFICATE_BUNDLE
+          SourceData:
+            X509CertificateData: !Ref CACertificate
+        - SourceType: AWS_ACM_PCA
+          SourceData:
+            AcmPcaArn: !Ref PCAArn
+
+  # ===========================================
+  # Certificate Issuer Lambda (Shared)
+  # ===========================================
+
+  CertificateIssuerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-cert-issuer"
+      Description: Shared certificate issuer for all IAM Roles Anywhere hosts
+      CodeUri: certificate_issuer/
+      Handler: app.lambda_handler
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            # EventBridge - for crhelper polling (async PCA certificate issuance)
+            - Effect: Allow
+              Action:
+                - events:PutRule
+                - events:DeleteRule
+                - events:PutTargets
+                - events:RemoveTargets
+              Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*"
+            # Lambda - allow EventBridge to invoke this function for polling
+            - Effect: Allow
+              Action:
+                - lambda:AddPermission
+                - lambda:RemovePermission
+              Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-cert-issuer"
+        # ACM PCA (if using PCA mode)
+        - !If
+          - UsePCA
+          - Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - acm-pca:DescribeCertificateAuthority
+                  - acm-pca:IssueCertificate
+                  - acm-pca:GetCertificate
+                Resource: !Ref PCAArn
+          - !Ref AWS::NoValue
+
+  # ===========================================
+  # SSM Parameters - IAM RA Configuration
+  # ===========================================
+
+  TrustAnchorArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub "${SSMPrefix}/trust-anchor-arn"
+      Description: IAM Roles Anywhere Trust Anchor ARN
+      Value: !GetAtt TrustAnchor.TrustAnchorArn
+
+  CertificateIssuerArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub "${SSMPrefix}/certificate-issuer-arn"
+      Description: Certificate Issuer Lambda ARN (shared by host stacks)
+      Value: !GetAtt CertificateIssuerFunction.Arn
+
+  RegionParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub "${SSMPrefix}/region"
+      Description: AWS Region for IAM Roles Anywhere
+      Value: !Ref AWS::Region
+
+Outputs:
+  TrustAnchorArn:
+    Description: ARN of the IAM Roles Anywhere Trust Anchor
+    Value: !GetAtt TrustAnchor.TrustAnchorArn
+
+  TrustAnchorArnParameterName:
+    Description: SSM Parameter name for Trust Anchor ARN
+    Value: !Sub "${SSMPrefix}/trust-anchor-arn"
+
+  CertificateIssuerArn:
+    Description: ARN of the Certificate Issuer Lambda
+    Value: !GetAtt CertificateIssuerFunction.Arn
+
+  CertificateIssuerArnParameterName:
+    Description: SSM Parameter name for Certificate Issuer ARN
+    Value: !Sub "${SSMPrefix}/certificate-issuer-arn"
+
+  CAMode:
+    Description: Certificate Authority mode
+    Value: !Ref CAMode
+
+  Region:
+    Description: AWS Region
+    Value: !Ref AWS::Region
+
+  NextSteps:
+    Description: Next steps after deployment
+    Value: !Sub |
+      ======================================================================
+      IAM ROLES ANYWHERE STACK DEPLOYED
+      ======================================================================
+
+      Trust Anchor ARN: ${TrustAnchor.TrustAnchorArn}
+      Certificate Issuer: ${CertificateIssuerFunction.Arn}
+      CA Mode: ${CAMode}
+      Region: ${AWS::Region}
+
+      Next: Deploy host stacks for each host:
+
+        sam build --config-env host
+        sam deploy --config-env host \
+          --stack-name iam-ra-host-<hostname> \
+          --parameter-overrides Hostname=<hostname>
+
+      All other values are resolved from SSM parameters.
+      ======================================================================
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 256
+    Runtime: python3.13
+    Architectures:
+      - arm64
+    LoggingConfig:
+      LogFormat: JSON
+    Tags:
+      Purpose: IAM-Roles-Anywhere
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Configuration
+        Parameters:
+          - SSMPrefix
+      - Label:
+          default: SSM Parameter References (from rootca stack)
+        Parameters:
+          - CAMode
+          - PCAArn
+          - CACertificate

@@ -1,0 +1,50 @@
+# CloudFormation - Validate and test SAM templates
+#
+# PLACEHOLDER: This workflow will be expanded to:
+# - Validate CloudFormation/SAM templates
+# - Run cfn-lint
+# - Optionally deploy to a test environment
+#
+# For now, it only validates the template syntax.
+
+name: CloudFormation
+
+on:
+  push:
+    paths:
+      - 'iam-ra-cli/iam_ra_cli/data/cloudformation/**'
+  pull_request:
+    paths:
+      - 'iam-ra-cli/iam_ra_cli/data/cloudformation/**'
+
+jobs:
+  validate:
+    name: Validate Templates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+
+      - name: Lint CloudFormation templates
+        run: |
+          cfn-lint iam-ra-cli/iam_ra_cli/data/cloudformation/*.yaml
+
+      # TODO: Add SAM validation
+      # - name: Setup SAM CLI
+      #   uses: aws-actions/setup-sam@v2
+
+      # - name: Validate SAM templates
+      #   run: |
+      #     cd iam-ra-cli/iam_ra_cli/data/cloudformation
+      #     sam validate --lint
+
+      # TODO: Add deployment to test environment
+      # This would require AWS credentials and a test account
