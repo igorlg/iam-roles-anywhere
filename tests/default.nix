@@ -1,15 +1,9 @@
 # IAM Roles Anywhere Tests
-{
-  self,
-  nixpkgs,
-  home-manager,
-  system,
-  ...
-}:
+{ inputs, system, self }:
 
 let
-  pkgs = nixpkgs.legacyPackages.${system};
-  lib = nixpkgs.lib;
+  pkgs = inputs.nixpkgs.legacyPackages.${system};
+  lib = inputs.nixpkgs.lib;
 
   # Sample ARNs for testing (not real)
   testArns = {
@@ -20,10 +14,8 @@ let
 
   # Helper to create test home-manager configurations
   mkTestHome =
-    {
-      extraConfig ? { },
-    }:
-    (home-manager.lib.homeManagerConfiguration {
+    { extraConfig ? { } }:
+    (inputs.home-manager.lib.homeManagerConfiguration {
       inherit pkgs;
       modules = [
         self.homeModules.default

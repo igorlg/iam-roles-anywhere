@@ -9,18 +9,16 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    # Python packaging - single source of truth from pyproject.toml + uv.lock
+    # Python packaging (uv2nix)
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
     uv2nix = {
       url = "github:pyproject-nix/uv2nix";
       inputs.pyproject-nix.follows = "pyproject-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
     pyproject-build-systems = {
       url = "github:pyproject-nix/build-system-pkgs";
       inputs.pyproject-nix.follows = "pyproject-nix";
@@ -30,17 +28,9 @@
   };
 
   outputs =
-    {
-      self,
-      nixpkgs,
-      home-manager,
-      pyproject-nix,
-      uv2nix,
-      pyproject-build-systems,
-      ...
-    }:
+    { self, ... }@inputs:
     let
-      inherit (nixpkgs) lib;
+      inherit (inputs.nixpkgs) lib;
 
       supportedSystems = [
         "x86_64-linux"
@@ -49,82 +39,59 @@
         "aarch64-darwin"
       ];
 
-      # IAM RA CLI package (Python, built with uv2nix)
-      iamRaCli = import ./iam-ra-cli/nix {
-        inherit
-          lib
-          nixpkgs
-          pyproject-nix
-          uv2nix
-          pyproject-build-systems
-          supportedSystems
-          ;
-      };
+      forAllSystems = lib.genAttrs supportedSystems;
+
+      # Import packages - both return { packages.${system}, devShellPackages.${system} }
+      cli = import ./iam-ra-cli/nix { inherit inputs supportedSystems; };
+      cdk = import ./iam-ra-cdk/nix { inherit inputs supportedSystems; };
 
       # Import module definitions
       modules = import ./modules { inherit lib; };
     in
     {
-      # ===================
-      # LIBRARY FUNCTIONS
-      # ===================
-
+      # ===== LIBRARY =====
       lib = import ./lib { inherit lib; };
 
-      # ===================
-      # MODULES
-      # ===================
-
-      # Home-manager module - for direct use in home-manager configurations
-      # Usage: programs.iamRolesAnywhere = { enable = true; ... };
+      # ===== MODULES =====
       homeModules.default = modules.homeModule;
-
-      # NixOS module - adds 'user' option and wires to home-manager
-      # Usage: programs.iamRolesAnywhere = { enable = true; user = "alice"; ... };
       nixosModules.default = modules.systemModule;
-
-      # Darwin module - same as NixOS, works on macOS with nix-darwin
       darwinModules.default = modules.systemModule;
 
-      # ===================
-      # PACKAGES
-      # ===================
-
-      packages = iamRaCli.packages;
-
-      # ===================
-      # TESTS
-      # ===================
-
-      checks = lib.genAttrs supportedSystems (
+      # ===== PACKAGES =====
+      packages = forAllSystems (
         system:
-        import ./tests {
-          inherit
-            self
-            nixpkgs
-            home-manager
-            system
-            ;
+        let
+          pkgs = inputs.nixpkgs.legacyPackages.${system};
+        in
+        {
+          inherit (cli.packages.${system}) iam-ra-cli;
+          inherit (cdk.packages.${system}) iam-ra-cdk;
+
+          # Default: combined CLI + CDK
+          default = pkgs.symlinkJoin {
+            name = "iam-roles-anywhere";
+            paths = [
+              cli.packages.${system}.iam-ra-cli
+              cdk.packages.${system}.iam-ra-cdk
+            ];
+          };
         }
       );
 
-      # ===================
-      # DEV SHELL
-      # ===================
-
+      # ===== DEV SHELLS =====
       devShells = import ./shells.nix {
-        inherit
-          lib
-          nixpkgs
-          iamRaCli
-          supportedSystems
-          ;
+        inherit inputs supportedSystems cli cdk;
       };
 
-      # ===================
-      # FORMATTER
-      # ===================
+      # ===== CHECKS =====
+      checks = forAllSystems (
+        system:
+        import ./tests {
+          inherit inputs system self;
+        }
+      );
 
-      formatter = lib.genAttrs supportedSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);
+      # ===== FORMATTER =====
+      formatter = forAllSystems (system: inputs.nixpkgs.legacyPackages.${system}.nixfmt-rfc-style);
     };
 }

@@ -1,73 +1,62 @@
-# Development shells for IAM Roles Anywhere flake
+# Development Shell
 #
-# Provides a development environment with:
-# - Python virtualenv (editable install from pyproject.toml + uv.lock)
-# - uv for managing Python dependencies
-# - Nix formatting/linting tools
-# - AWS CLI and tools
-# - Certificate management tools
-# - just for task running
-{
-  lib,
-  nixpkgs,
-  iamRaCli,
-  supportedSystems,
-}:
+# Combines dev dependencies from CLI and CDK packages with shared tooling.
+#
+# Usage: nix develop
+{ inputs, supportedSystems, cli, cdk }:
 let
+  inherit (inputs.nixpkgs) lib;
   forAllSystems = lib.genAttrs supportedSystems;
-
-  inherit (iamRaCli.python) workspace pythonSets editableOverlay;
 in
 forAllSystems (
   system:
   let
-    pkgs = nixpkgs.legacyPackages.${system};
-    pythonSet = pythonSets.${system}.overrideScope editableOverlay;
-    virtualenv = pythonSet.mkVirtualEnv "iam-ra-cli-dev-env" workspace.deps.all;
+    pkgs = inputs.nixpkgs.legacyPackages.${system};
   in
   {
     default = pkgs.mkShell {
-      packages = [
-        virtualenv
-        pkgs.uv
+      packages =
+        # Package-specific dev dependencies
+        cli.devShellPackages.${system}
+        ++ cdk.devShellPackages.${system}
+        ++ [
+          # Task runner
+          pkgs.just
 
-        # Task runner
-        pkgs.just
+          # Nix tools
+          pkgs.nixfmt
+          pkgs.statix
+          pkgs.deadnix
 
-        # Nix tools
-        pkgs.nixfmt
-        pkgs.statix
-        pkgs.deadnix
+          # AWS tools
+          pkgs.awscli2
+          pkgs.aws-signing-helper
 
-        # AWS tools
-        pkgs.awscli2
-        pkgs.aws-signing-helper
+          # Certificate tools
+          pkgs.openssl
 
-        # CloudFormation linting (Python package)
-        pkgs.python3Packages.cfn-lint
-
-        # Certificate tools
-        pkgs.openssl
-
-        # SOPS for secrets
-        pkgs.sops
-      ];
+          # SOPS for secrets
+          pkgs.sops
+        ];
 
       env = {
-        # Prevent uv from managing virtualenv - Nix handles this
-        UV_NO_SYNC = "1";
-        UV_PYTHON = pythonSet.python.interpreter;
+        # Prevent uv from downloading Python - use Nix-provided
         UV_PYTHON_DOWNLOADS = "never";
       };
 
       shellHook = ''
-        unset PYTHONPATH
-        export REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-
         echo "IAM Roles Anywhere development shell"
         echo ""
-        echo "Run 'just' to see available commands"
+        echo "Available tools:"
+        echo "  iam-ra    - CLI for IAM Roles Anywhere"
+        echo "  cdk       - AWS CDK CLI"
+        echo "  aws       - AWS CLI"
+        echo "  just      - Task runner"
         echo ""
+        echo "For Python development with hot-reload:"
+        echo "  uv sync && source .venv/bin/activate"
+        echo ""
+        echo "Run 'just' to see available commands"
       '';
     };
   }

@@ -1,54 +1,65 @@
-# IAM Roles Anywhere CLI - Package export
+# IAM Roles Anywhere CLI - Nix Package
 #
-# Builds the iam-ra-cli package from pyproject.toml + uv.lock using uv2nix.
-# Usage in flake.nix:
-#   packages = iamRaCli.packages;
-{
-  lib,
-  nixpkgs,
-  pyproject-nix,
-  uv2nix,
-  pyproject-build-systems,
-  supportedSystems,
-}:
+# Builds the Python CLI using uv2nix from pyproject.toml + uv.lock.
+#
+# Returns: { packages.${system}, devShellPackages.${system} }
+{ inputs, supportedSystems }:
 let
+  inherit (inputs.nixpkgs) lib;
   forAllSystems = lib.genAttrs supportedSystems;
 
-  python = import ./python.nix {
-    inherit
-      lib
-      nixpkgs
-      pyproject-nix
-      uv2nix
-      pyproject-build-systems
-      supportedSystems
-      ;
+  # Load workspace from root pyproject.toml + uv.lock
+  workspace = inputs.uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./../..; };
+
+  # Overlay for production builds (prefer wheels)
+  overlay = workspace.mkPyprojectOverlay {
+    sourcePreference = "wheel";
   };
 
-  inherit (python) workspace pythonSets editableOverlay;
+  # Python package sets per system
+  pythonSets = forAllSystems (
+    system:
+    let
+      pkgs = inputs.nixpkgs.legacyPackages.${system};
+      python = pkgs.python312;
+    in
+    (pkgs.callPackage inputs.pyproject-nix.build.packages {
+      inherit python;
+    }).overrideScope
+      (
+        lib.composeManyExtensions [
+          inputs.pyproject-build-systems.overlays.wheel
+          overlay
+        ]
+      )
+  );
 in
 {
-  # Re-export python internals for shells.nix
-  inherit python;
-
-  # Package outputs
   packages = forAllSystems (
     system:
     let
-      pkgs = nixpkgs.legacyPackages.${system};
+      pkgs = inputs.nixpkgs.legacyPackages.${system};
       pythonSet = pythonSets.${system};
-      inherit (pkgs.callPackages pyproject-nix.build.util { }) mkApplication;
+      inherit (pkgs.callPackages inputs.pyproject-nix.build.util { }) mkApplication;
     in
     {
       iam-ra-cli = mkApplication {
         venv = pythonSet.mkVirtualEnv "iam-ra-cli-env" workspace.deps.default;
         package = pythonSet.iam-ra-cli;
       };
-
-      default = mkApplication {
-        venv = pythonSet.mkVirtualEnv "iam-ra-cli-env" workspace.deps.default;
-        package = pythonSet.iam-ra-cli;
-      };
     }
+  );
+
+  devShellPackages = forAllSystems (
+    system:
+    let
+      pkgs = inputs.nixpkgs.legacyPackages.${system};
+      pythonSet = pythonSets.${system};
+      virtualenv = pythonSet.mkVirtualEnv "iam-ra-cli-dev-env" workspace.deps.all;
+    in
+    [
+      virtualenv
+      pkgs.uv
+    ]
   );
 }
