@@ -10,7 +10,6 @@ from iam_ra_cli.lib.errors import (
     CACertNotFoundError,
     CAKeyNotFoundError,
     HostError,
-    S3ReadError,
     StackDeleteError,
     StackDeployError,
 )

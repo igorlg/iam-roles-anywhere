@@ -3,13 +3,13 @@
 from dataclasses import dataclass
 
 from iam_ra_cli import __version__
-from iam_ra_cli.lib import paths, state as state_module
+from iam_ra_cli.lib import paths
+from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
-from iam_ra_cli.lib.errors import CAError, StackDeployError, StateLoadError, StateSaveError
+from iam_ra_cli.lib.errors import CAError, StackDeployError, StateSaveError
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.models import CA, CAMode, Init, State
 from iam_ra_cli.operations.ca import (
-    SelfSignedCAResult,
     attach_existing_pca,
     create_pca_ca,
     create_self_signed_ca,
@@ -71,23 +71,23 @@ def init(ctx: AwsContext, config: InitConfig) -> Result[State, InitError]:
             ):
                 case Err() as e:
                     return e
-                case Ok(ca_result):
+                case Ok(self_signed_result):
                     new_state.ca = CA(
-                        stack_name=ca_result.stack_name,
+                        stack_name=self_signed_result.stack_name,
                         mode=CAMode.SELF_SIGNED,
-                        trust_anchor_arn=ca_result.trust_anchor_arn,
+                        trust_anchor_arn=self_signed_result.trust_anchor_arn,
                     )
 
         case CAMode.PCA_NEW:
             match create_pca_ca(ctx, config.namespace, validity_years=config.ca_validity_years):
                 case Err() as e:
                     return e
-                case Ok(ca_result):
+                case Ok(pca_new_result):
                     new_state.ca = CA(
-                        stack_name=ca_result.stack_name,
+                        stack_name=pca_new_result.stack_name,
                         mode=CAMode.PCA_NEW,
-                        trust_anchor_arn=ca_result.trust_anchor_arn,
-                        pca_arn=ca_result.pca_arn,
+                        trust_anchor_arn=pca_new_result.trust_anchor_arn,
+                        pca_arn=pca_new_result.pca_arn,
                     )
 
         case CAMode.PCA_EXISTING:
@@ -98,12 +98,12 @@ def init(ctx: AwsContext, config: InitConfig) -> Result[State, InitError]:
             match attach_existing_pca(ctx, config.namespace, config.pca_arn):
                 case Err() as e:
                     return e
-                case Ok(ca_result):
+                case Ok(pca_existing_result):
                     new_state.ca = CA(
-                        stack_name=ca_result.stack_name,
+                        stack_name=pca_existing_result.stack_name,
                         mode=CAMode.PCA_EXISTING,
-                        trust_anchor_arn=ca_result.trust_anchor_arn,
-                        pca_arn=ca_result.pca_arn,
+                        trust_anchor_arn=pca_existing_result.trust_anchor_arn,
+                        pca_arn=pca_existing_result.pca_arn,
                     )
 
     # Step 3: Save state

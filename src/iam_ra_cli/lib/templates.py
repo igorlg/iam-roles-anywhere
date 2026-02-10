@@ -4,7 +4,6 @@ import subprocess
 import tempfile
 from importlib import resources
 from pathlib import Path
-from typing import Optional
 
 
 def get_cloudformation_path() -> Path:
@@ -47,8 +46,8 @@ class SAMRunner:
     def __init__(
         self,
         region: str,
-        profile: Optional[str] = None,
-        build_dir: Optional[Path] = None,
+        profile: str | None = None,
+        build_dir: Path | None = None,
     ):
         """
         Initialize SAM runner.
@@ -125,10 +124,10 @@ class SAMRunner:
         self,
         template: str,
         stack_name: str,
-        parameter_overrides: Optional[dict[str, str]] = None,
-        capabilities: Optional[list[str]] = None,
+        parameter_overrides: dict[str, str] | None = None,
+        capabilities: list[str] | None = None,
         no_confirm: bool = True,
-        tags: Optional[dict[str, str]] = None,
+        tags: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         """
         Run sam deploy for a template.
@@ -189,10 +188,10 @@ class SAMRunner:
         self,
         template: str,
         stack_name: str,
-        parameter_overrides: Optional[dict[str, str]] = None,
-        capabilities: Optional[list[str]] = None,
+        parameter_overrides: dict[str, str] | None = None,
+        capabilities: list[str] | None = None,
         no_confirm: bool = True,
-        tags: Optional[dict[str, str]] = None,
+        tags: dict[str, str] | None = None,
         use_container: bool = False,
     ) -> subprocess.CompletedProcess:
         """

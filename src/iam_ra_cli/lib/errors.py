@@ -7,7 +7,6 @@ Pattern match on these in the CLI layer to provide user-friendly messages.
 from dataclasses import dataclass
 from pathlib import Path
 
-
 # =============================================================================
 # Infrastructure Errors
 # =============================================================================

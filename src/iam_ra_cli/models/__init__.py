@@ -133,9 +133,9 @@ class State:
 
 def _from_dict(cls: type, data: Any) -> Any:
     """Reconstruct typed dataclass from dict. Handles Arn, Enum, Optional, nested."""
+    import types
     from dataclasses import fields, is_dataclass
     from typing import get_args, get_origin, get_type_hints
-    import types
 
     if data is None:
         return None
@@ -176,9 +176,9 @@ def _from_dict(cls: type, data: Any) -> Any:
 
     # tuple[X, ...]
     if origin is tuple:
-        args = get_args(cls)
-        if len(args) == 2 and args[1] is ...:
-            return tuple(_from_dict(args[0], v) for v in data)
-        return tuple(_from_dict(t, v) for t, v in zip(args, data))
+        tuple_args = get_args(cls)
+        if len(tuple_args) == 2 and tuple_args[1] is ...:
+            return tuple(_from_dict(tuple_args[0], v) for v in data)
+        return tuple(_from_dict(t, v) for t, v in zip(tuple_args, data))
 
     return data

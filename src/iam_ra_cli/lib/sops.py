@@ -1,9 +1,9 @@
 """SOPS integration for IAM Roles Anywhere CLI."""
 
 import subprocess
-import yaml
 from pathlib import Path
-from typing import Optional
+
+import yaml
 
 
 def create_secrets_yaml(
@@ -51,7 +51,7 @@ def create_secrets_yaml(
 def write_and_encrypt(
     content: str,
     output_path: Path,
-    sops_config_path: Optional[Path] = None,
+    sops_config_path: Path | None = None,
 ) -> None:
     """
     Write YAML content to a file and encrypt it with SOPS.
@@ -89,7 +89,7 @@ def write_and_encrypt(
 
 def decrypt_file(
     file_path: Path,
-    sops_config_path: Optional[Path] = None,
+    sops_config_path: Path | None = None,
 ) -> str:
     """
     Decrypt a SOPS-encrypted file and return its contents.
@@ -115,7 +115,7 @@ def decrypt_file(
     return result.stdout
 
 
-def get_nix_repo_root() -> Optional[Path]:
+def get_nix_repo_root() -> Path | None:
     """
     Find the root of the Nix repository by looking for flake.nix.
 
@@ -132,7 +132,7 @@ def get_nix_repo_root() -> Optional[Path]:
     return None
 
 
-def get_secrets_path(hostname: str, repo_root: Optional[Path] = None) -> Path:
+def get_secrets_path(hostname: str, repo_root: Path | None = None) -> Path:
     """
     Get the path where host secrets should be stored.
 

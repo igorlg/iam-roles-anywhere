@@ -1,7 +1,6 @@
 """Infrastructure operations - init stack deployment."""
 
 from dataclasses import dataclass
-from pathlib import Path
 
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.cfn import delete_stack, deploy_stack

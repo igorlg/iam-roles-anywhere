@@ -9,8 +9,9 @@ Inspired by Rust's Result<T, E>. Use pattern matching to handle results:
             # handle error
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Generic, TypeVar
+from typing import Generic, TypeVar
 
 T = TypeVar("T")
 U = TypeVar("U")

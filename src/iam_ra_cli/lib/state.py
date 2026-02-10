@@ -15,7 +15,6 @@ from botocore.exceptions import ClientError
 
 from iam_ra_cli.lib import paths
 from iam_ra_cli.lib.errors import (
-    S3ReadError,
     SSMReadError,
     SSMWriteError,
     StateLoadError,

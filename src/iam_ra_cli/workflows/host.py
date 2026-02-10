@@ -19,9 +19,11 @@ from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.models import CAMode, Host
 from iam_ra_cli.operations.host import (
     HostError,
-    offboard_host as offboard_host_op,
     onboard_host_pca,
     onboard_host_self_signed,
+)
+from iam_ra_cli.operations.host import (
+    offboard_host as offboard_host_op,
 )
 from iam_ra_cli.operations.secrets import SecretsFileResult, create_secrets_file
 
