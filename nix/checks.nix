@@ -1,5 +1,9 @@
 # IAM Roles Anywhere Tests
-{ inputs, system, self }:
+{
+  inputs,
+  system,
+  self,
+}:
 
 let
   pkgs = inputs.nixpkgs.legacyPackages.${system};
@@ -14,7 +18,9 @@ let
 
   # Helper to create test home-manager configurations
   mkTestHome =
-    { extraConfig ? { } }:
+    {
+      extraConfig ? { },
+    }:
     (inputs.home-manager.lib.homeManagerConfiguration {
       inherit pkgs;
       modules = [

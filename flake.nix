@@ -57,13 +57,10 @@
       darwinModules.default = modules.systemModule;
 
       # ===== PACKAGES =====
-      packages = forAllSystems (
-        system:
-        {
-          inherit (cli.packages.${system}) iam-ra-cli;
-          default = cli.packages.${system}.iam-ra-cli;
-        }
-      );
+      packages = forAllSystems (system: {
+        inherit (cli.packages.${system}) iam-ra-cli;
+        default = cli.packages.${system}.iam-ra-cli;
+      });
 
       # ===== DEV SHELLS =====
       devShells = import ./shells.nix {

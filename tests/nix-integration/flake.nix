@@ -16,7 +16,13 @@
     iam-ra.url = "path:../..";
   };
 
-  outputs = { self, nixpkgs, home-manager, iam-ra }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      home-manager,
+      iam-ra,
+    }:
     let
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -32,7 +38,7 @@
       # TEST 1: Package installation
       # ========================================
       # Consumer can add iam-ra-cli to their packages
-      test-cli-available = pkgs.runCommand "test-cli-available" {} ''
+      test-cli-available = pkgs.runCommand "test-cli-available" { } ''
         echo "Testing that iam-ra-cli package is available..."
         test -x "${iam-ra.packages.${system}.iam-ra-cli}/bin/iam-ra"
         echo "PASS: iam-ra-cli binary exists"
@@ -44,45 +50,46 @@
       # TEST 2: Home-manager module works
       # ========================================
       # Consumer can use homeModules.default to configure a host
-      test-home-module = (home-manager.lib.homeManagerConfiguration {
-        inherit pkgs;
-        modules = [
-          # Import the iam-ra home module
-          iam-ra.homeModules.default
-          
-          # Configure the module
-          {
-            home = {
-              username = "testuser";
-              homeDirectory = "/Users/testuser";
-              stateVersion = "24.11";
-            };
+      test-home-module =
+        (home-manager.lib.homeManagerConfiguration {
+          inherit pkgs;
+          modules = [
+            # Import the iam-ra home module
+            iam-ra.homeModules.default
 
-            programs.iamRolesAnywhere = {
-              enable = true;
-              certificate = {
-                certPath = "/run/secrets/iam-ra/cert.pem";
-                keyPath = "/run/secrets/iam-ra/key.pem";
+            # Configure the module
+            {
+              home = {
+                username = "testuser";
+                homeDirectory = "/Users/testuser";
+                stateVersion = "24.11";
               };
-              aws = {
-                region = "ap-southeast-2";
-                trustAnchorArn = testArns.trustAnchor;
-                profileArn = testArns.profile;
-                roleArn = testArns.role;
+
+              programs.iamRolesAnywhere = {
+                enable = true;
+                certificate = {
+                  certPath = "/run/secrets/iam-ra/cert.pem";
+                  keyPath = "/run/secrets/iam-ra/key.pem";
+                };
+                aws = {
+                  region = "ap-southeast-2";
+                  trustAnchorArn = testArns.trustAnchor;
+                  profileArn = testArns.profile;
+                  roleArn = testArns.role;
+                };
+                awsProfile = {
+                  name = "iam-ra";
+                  makeDefault = false;
+                };
               };
-              awsProfile = {
-                name = "iam-ra";
-                makeDefault = false;
-              };
-            };
-          }
-        ];
-      }).activationPackage;
+            }
+          ];
+        }).activationPackage;
 
       # ========================================
       # TEST 3: Library functions accessible
       # ========================================
-      test-lib-accessible = pkgs.runCommand "test-lib-accessible" {} ''
+      test-lib-accessible = pkgs.runCommand "test-lib-accessible" { } ''
         echo "Testing that lib functions are accessible..."
         ${
           let

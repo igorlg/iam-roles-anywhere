@@ -3,7 +3,11 @@
 # Combines dev dependencies from CLI package with shared tooling.
 #
 # Usage: nix develop
-{ inputs, supportedSystems, cli }:
+{
+  inputs,
+  supportedSystems,
+  cli,
+}:
 let
   inherit (inputs.nixpkgs) lib;
   forAllSystems = lib.genAttrs supportedSystems;
@@ -17,8 +21,7 @@ forAllSystems (
     default = pkgs.mkShell {
       packages =
         # Package-specific dev dependencies
-        cli.devShellPackages.${system}
-        ++ [
+        cli.devShellPackages.${system} ++ [
           # Task runner
           pkgs.just
 

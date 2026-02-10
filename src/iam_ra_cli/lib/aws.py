@@ -4,15 +4,20 @@ AwsContext is created once at CLI entry and passed to all operations.
 Uses cached_property for lazy client initialization.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 import boto3
-from mypy_boto3_cloudformation import CloudFormationClient
-from mypy_boto3_s3 import S3Client
-from mypy_boto3_secretsmanager import SecretsManagerClient
-from mypy_boto3_ssm import SSMClient
-from mypy_boto3_sts import STSClient
+
+if TYPE_CHECKING:
+    from mypy_boto3_cloudformation import CloudFormationClient
+    from mypy_boto3_s3 import S3Client
+    from mypy_boto3_secretsmanager import SecretsManagerClient
+    from mypy_boto3_ssm import SSMClient
+    from mypy_boto3_sts import STSClient
 
 
 @dataclass

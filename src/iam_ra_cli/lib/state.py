@@ -6,11 +6,12 @@ Flow:
 3. Local cache at ~/.cache/iam-ra/<namespace>/state.json
 """
 
+from __future__ import annotations
+
 import re
+from typing import TYPE_CHECKING
 
 from botocore.exceptions import ClientError
-from mypy_boto3_s3 import S3Client
-from mypy_boto3_ssm import SSMClient
 
 from iam_ra_cli.lib import paths
 from iam_ra_cli.lib.errors import (
@@ -23,6 +24,10 @@ from iam_ra_cli.lib.errors import (
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.lib.storage import file
 from iam_ra_cli.models import State
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3 import S3Client
+    from mypy_boto3_ssm import SSMClient
 
 # Cache TTL in seconds (5 minutes)
 CACHE_TTL = 300

@@ -1,32 +1,31 @@
 # CLI - Test Python CLI independently
 #
-# PLACEHOLDER: This workflow will be expanded to:
-# - Run pytest with coverage
-# - Run type checking (mypy)
-# - Run linting (ruff)
-# - Test CLI commands in isolation (mocked AWS)
-#
-# For now, it only runs basic Python checks.
+# Runs:
+# - pytest with coverage
+# - Type checking (mypy)
+# - Linting (ruff)
+# - Verifies CLI loads
 
 name: CLI
 
 on:
   push:
     paths:
-      - 'iam-ra-cli/**'
-      - '!iam-ra-cli/iam_ra_cli/data/cloudformation/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
   pull_request:
     paths:
-      - 'iam-ra-cli/**'
-      - '!iam-ra-cli/iam_ra_cli/data/cloudformation/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
 
 jobs:
   test:
     name: Python Tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: iam-ra-cli
 
     steps:
       - name: Checkout
@@ -41,17 +40,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
-      # TODO: Add pytest once tests are written
-      # - name: Run tests
-      #   run: uv run pytest --cov=iam_ra_cli --cov-report=xml
+      - name: Run tests
+        run: uv run pytest tests/ -v --cov=src/iam_ra_cli --cov-report=xml
 
-      # TODO: Add type checking
-      # - name: Type check
-      #   run: uv run mypy iam_ra_cli
+      - name: Type check
+        run: uv run mypy src/iam_ra_cli --ignore-missing-imports
 
-      # TODO: Add linting
-      # - name: Lint
-      #   run: uv run ruff check iam_ra_cli
+      - name: Lint
+        run: uv run ruff check src/iam_ra_cli
 
       - name: Verify CLI loads
         run: uv run iam-ra --help

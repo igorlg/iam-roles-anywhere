@@ -4,11 +4,17 @@ Low-level helpers that work with S3 client.
 Returns Result types for error handling.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from botocore.exceptions import ClientError
-from mypy_boto3_s3 import S3Client
 
 from iam_ra_cli.lib.errors import S3ReadError, S3WriteError
 from iam_ra_cli.lib.result import Err, Ok, Result
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3 import S3Client
 
 
 def read_object(s3: S3Client, bucket: str, key: str) -> Result[str, S3ReadError]:

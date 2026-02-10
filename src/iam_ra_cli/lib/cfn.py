@@ -4,14 +4,18 @@ Low-level helpers that work with CloudFormation client.
 Returns Result types for error handling.
 """
 
+from __future__ import annotations
+
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from botocore.exceptions import ClientError
-from mypy_boto3_cloudformation import CloudFormationClient
 
 from iam_ra_cli.lib.errors import StackDeleteError, StackDeployError
 from iam_ra_cli.lib.result import Err, Ok, Result
+
+if TYPE_CHECKING:
+    from mypy_boto3_cloudformation import CloudFormationClient
 
 
 def stack_exists(cfn: CloudFormationClient, stack_name: str) -> bool:

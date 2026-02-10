@@ -1,10 +1,13 @@
-"""IAM Roles Anywhere CLI entry point."""
+"""IAM Roles Anywhere CLI entry point.
+
+NOTE: The commands layer is a work-in-progress. The underlying workflows/
+and operations/ layers are complete and tested. This CLI entry point
+provides a minimal interface until the commands are fully wired up.
+"""
 
 import click
 
 from . import __version__
-from .commands.onboard import onboard
-from .commands.init import init
 
 
 @click.group()
@@ -16,19 +19,14 @@ def cli():
 
 @cli.command()
 def status():
-    """Show current IAM Roles Anywhere configuration status."""
+    """Show current IAM Roles Anywhere CLI status."""
     click.echo("IAM Roles Anywhere CLI")
     click.echo(f"Version: {__version__}")
     click.echo("")
-    click.echo("Commands available:")
-    click.echo("  iam-ra init      - Initialize IAM Roles Anywhere infrastructure")
-    click.echo("  iam-ra onboard   - Onboard a host (deploy stack + fetch secrets)")
-    click.echo("  iam-ra status    - Show this status")
-
-
-# Register subcommands
-cli.add_command(init)
-cli.add_command(onboard)
+    click.echo("This CLI is a work-in-progress.")
+    click.echo("The underlying workflows and operations are complete and tested.")
+    click.echo("")
+    click.echo("See docs/cli-design.md for architecture details.")
 
 
 if __name__ == "__main__":
