@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: IAM Roles Anywhere - IAM Role and Profile
+
+Parameters:
+  Namespace:
+    Type: String
+    Description: Namespace identifier
+
+  RoleName:
+    Type: String
+    Description: Logical name for this role
+
+  PolicyArns:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Optional managed policy ARNs to attach
+
+  SessionDuration:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 43200
+    Description: IAM session duration in seconds
+
+Outputs:
+  Version:
+    Description: Template version
+    Value: "0.2.0"
+
+  RoleArn:
+    Description: IAM Role ARN
+    Value: !GetAtt Role.Arn
+
+  ProfileArn:
+    Description: IAM Roles Anywhere Profile ARN
+    Value: !GetAtt Profile.ProfileArn
+
+Conditions:
+  HasPolicies: !Not [!Equals [!Join ["", !Ref PolicyArns], ""]]
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "iam-ra-${Namespace}-${RoleName}"
+      MaxSessionDuration: !Ref SessionDuration
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rolesanywhere.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+              - sts:SetSourceIdentity
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub "{{resolve:ssm:/iam-ra/${Namespace}/trust-anchor-arn}}"
+      ManagedPolicyArns: !If
+        - HasPolicies
+        - !Ref PolicyArns
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: iam-ra:namespace
+          Value: !Ref Namespace
+        - Key: iam-ra:role
+          Value: !Ref RoleName
+
+  Profile:
+    Type: AWS::RolesAnywhere::Profile
+    Properties:
+      Name: !Sub "iam-ra-${Namespace}-${RoleName}"
+      Enabled: true
+      DurationSeconds: !Ref SessionDuration
+      RoleArns:
+        - !GetAtt Role.Arn
+      Tags:
+        - Key: iam-ra:namespace
+          Value: !Ref Namespace
+        - Key: iam-ra:role
+          Value: !Ref RoleName

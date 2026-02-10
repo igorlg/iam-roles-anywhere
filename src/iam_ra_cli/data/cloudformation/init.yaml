@@ -1,0 +1,255 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: IAM Roles Anywhere - Init Stack (S3 bucket, KMS key, S3 fetcher Lambda)
+
+Parameters:
+  Namespace:
+    Type: String
+    Description: Namespace identifier for this IAM-RA deployment
+
+Outputs:
+  Version:
+    Description: Template version
+    Value: "0.2.0"
+
+  BucketArn:
+    Description: S3 bucket ARN for state and certificate storage
+    Value: !GetAtt Bucket.Arn
+
+  BucketName:
+    Description: S3 bucket name
+    Value: !Ref Bucket
+
+  KMSKeyArn:
+    Description: KMS key ARN for encrypting sensitive data
+    Value: !GetAtt KMSKey.Arn
+
+  FetcherFunctionArn:
+    Description: Lambda ARN for fetching objects from S3 (use as Custom Resource)
+    Value: !GetAtt FetcherFunction.Arn
+
+Resources:
+  # ==========================================================================
+  # S3 Bucket - stores state and certificates (KMS encrypted)
+  # ==========================================================================
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  BucketNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/iam-ra/${Namespace}/bucket-name"
+      Type: String
+      Value: !Ref Bucket
+
+  # ==========================================================================
+  # KMS Key - encrypts S3 objects, only Lambdas can decrypt
+  # ==========================================================================
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "IAM Roles Anywhere encryption key (${Namespace})"
+      EnableKeyRotation: true
+      # KeyPolicy:
+      #   Version: "2012-10-17"
+      #   Statement:
+      #     # Root account can manage the key
+      #     - Sid: AllowKeyManagement
+      #       Effect: Allow
+      #       Principal:
+      #         AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+      #       Action:
+      #         - kms:Create*
+      #         - kms:Describe*
+      #         - kms:Enable*
+      #         - kms:List*
+      #         - kms:Put*
+      #         - kms:Update*
+      #         - kms:Revoke*
+      #         - kms:Disable*
+      #         - kms:Get*
+      #         - kms:Delete*
+      #         - kms:ScheduleKeyDeletion
+      #         - kms:CancelKeyDeletion
+      #         - kms:TagResource
+      #         - kms:UntagResource
+      #       Resource: "*"
+      #     # Root account (CLI) can encrypt when uploading to S3
+      #     - Sid: AllowEncrypt
+      #       Effect: Allow
+      #       Principal:
+      #         AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+      #       Action:
+      #         - kms:Encrypt
+      #         - kms:GenerateDataKey*
+      #       Resource: "*"
+      #     # Only Lambdas can decrypt (for reading S3 objects)
+      #     - Sid: AllowDecryptForFetcher
+      #       Effect: Allow
+      #       Principal:
+      #         AWS: !GetAtt FetcherRole.Arn
+      #       Action:
+      #         - kms:Decrypt
+      #       Resource: "*"
+      #     - Sid: AllowDecryptForCleanup
+      #       Effect: Allow
+      #       Principal:
+      #         AWS: !GetAtt CleanupRole.Arn
+      #       Action:
+      #         - kms:Decrypt
+      #       Resource: "*"
+
+  KMSKeyArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/iam-ra/${Namespace}/kms-key-arn"
+      Type: String
+      Value: !GetAtt KMSKey.Arn
+
+  KMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/iam-ra-${Namespace}"
+      TargetKeyId: !Ref KMSKey
+
+  # ==========================================================================
+  # Fetcher Lambda - reads S3 objects for CloudFormation Custom Resources
+  # ==========================================================================
+  FetcherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Fetches objects from IAM-RA S3 bucket (Custom Resource)
+      Handler: index.handler
+      Timeout: 30
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub "${Bucket.Arn}/*"
+          - Effect: Allow
+            Action: kms:Decrypt
+            Resource: !GetAtt KMSKey.Arn
+      LoggingConfig:
+        LogGroup: !Ref FetcherLogGroup
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref Bucket
+      InlineCode: |
+        import boto3
+        import cfnresponse
+        import os
+
+        s3 = boto3.client('s3')
+        bucket = os.environ['BUCKET_NAME']
+
+        def handler(event, context):
+            try:
+                if event['RequestType'] == 'Delete':
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                    return
+
+                key = event['ResourceProperties']['Key']
+                response = s3.get_object(Bucket=bucket, Key=key)
+                content = response['Body'].read().decode('utf-8')
+
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                    'Content': content
+                })
+            except Exception as e:
+                print(f"Error: {e}")
+                cfnresponse.send(event, context, cfnresponse.FAILED, {
+                    'Error': str(e)
+                })
+
+  FetcherLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/iam-ra-${Namespace}-fetcher"
+
+  FetcherArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/iam-ra/${Namespace}/fetcher-function-arn"
+      Type: String
+      Value: !GetAtt FetcherFunction.Arn
+
+  # ==========================================================================
+  # Cleanup Lambda - empties bucket on stack deletion
+  # ==========================================================================
+  CleanupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Empties S3 bucket before stack deletion
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:ListBucket
+              - s3:ListBucketVersions
+            Resource:
+              - !GetAtt Bucket.Arn
+              - !Sub "${Bucket.Arn}/*"
+      LoggingConfig:
+        LogGroup: !Ref CleanupLogGroup
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref Bucket
+      InlineCode: |
+        import boto3
+        import cfnresponse
+        import os
+
+        def handler(event, context):
+            bucket = os.environ['BUCKET_NAME']
+
+            if event['RequestType'] == 'Delete':
+                try:
+                    s3 = boto3.resource('s3')
+                    bucket_obj = s3.Bucket(bucket)
+                    bucket_obj.object_versions.delete()
+                    print(f"Emptied bucket {bucket}")
+                except Exception as e:
+                    print(f"Error emptying bucket: {e}")
+
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+  CleanupLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/iam-ra-${Namespace}-cleanup"
+      RetentionInDays: 7
+
+  CleanupTrigger:
+    Type: Custom::BucketCleanup
+    Properties:
+      ServiceToken: !GetAtt CleanupFunction.Arn
+
+Globals:
+  Function:
+    Handler: index.handler
+    Timeout: 300
+    Runtime: python3.12
+    Architectures:
+      - arm64
+

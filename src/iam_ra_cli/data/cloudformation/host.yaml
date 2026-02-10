@@ -1,0 +1,77 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: IAM Roles Anywhere - Host Certificate Secrets
+
+Parameters:
+  Namespace:
+    Type: String
+    Description: Namespace identifier
+
+  Hostname:
+    Type: String
+    Description: Host identifier (certificate CN)
+
+  CertificateS3Key:
+    Type: String
+    Description: S3 object key for host certificate
+
+  PrivateKeyS3Key:
+    Type: String
+    Description: S3 object key for private key
+
+Outputs:
+  Version:
+    Description: Template version
+    Value: "0.2.0"
+
+  CertificateSecretArn:
+    Description: Secrets Manager ARN for certificate
+    Value: !Ref CertificateSecret
+
+  PrivateKeySecretArn:
+    Description: Secrets Manager ARN for private key
+    Value: !Ref PrivateKeySecret
+
+  Hostname:
+    Description: Host identifier
+    Value: !Ref Hostname
+
+Resources:
+  # Fetch certificate from S3
+  Certificate:
+    Type: Custom::S3Fetch
+    Properties:
+      ServiceToken: !Sub "{{resolve:ssm:/iam-ra/${Namespace}/fetcher-function-arn}}"
+      Key: !Ref CertificateS3Key
+
+  # Fetch private key from S3
+  PrivateKey:
+    Type: Custom::S3Fetch
+    Properties:
+      ServiceToken: !Sub "{{resolve:ssm:/iam-ra/${Namespace}/fetcher-function-arn}}"
+      Key: !Ref PrivateKeyS3Key
+
+  CertificateSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "iam-ra/${Namespace}/${Hostname}/certificate"
+      Description: !Sub "IAM Roles Anywhere certificate for ${Hostname}"
+      KmsKeyId: !Sub "{{resolve:ssm:/iam-ra/${Namespace}/kms-key-arn}}"
+      SecretString: !GetAtt Certificate.Content
+      Tags:
+        - Key: iam-ra:namespace
+          Value: !Ref Namespace
+        - Key: iam-ra:hostname
+          Value: !Ref Hostname
+
+  PrivateKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "iam-ra/${Namespace}/${Hostname}/private-key"
+      Description: !Sub "IAM Roles Anywhere private key for ${Hostname}"
+      KmsKeyId: !Sub "{{resolve:ssm:/iam-ra/${Namespace}/kms-key-arn}}"
+      SecretString: !GetAtt PrivateKey.Content
+      Tags:
+        - Key: iam-ra:namespace
+          Value: !Ref Namespace
+        - Key: iam-ra:hostname
+          Value: !Ref Hostname
