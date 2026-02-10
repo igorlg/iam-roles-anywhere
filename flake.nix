@@ -41,16 +41,15 @@
 
       forAllSystems = lib.genAttrs supportedSystems;
 
-      # Import packages - both return { packages.${system}, devShellPackages.${system} }
-      cli = import ./iam-ra-cli/nix { inherit inputs supportedSystems; };
-      cdk = import ./iam-ra-cdk/nix { inherit inputs supportedSystems; };
+      # Import CLI package - returns { packages.${system}, devShellPackages.${system} }
+      cli = import ./nix/package.nix { inherit inputs supportedSystems; };
 
       # Import module definitions
-      modules = import ./modules { inherit lib; };
+      modules = import ./nix/module.nix { inherit lib; };
     in
     {
       # ===== LIBRARY =====
-      lib = import ./lib { inherit lib; };
+      lib = import ./nix/lib.nix { inherit lib; };
 
       # ===== MODULES =====
       homeModules.default = modules.homeModule;
@@ -60,33 +59,21 @@
       # ===== PACKAGES =====
       packages = forAllSystems (
         system:
-        let
-          pkgs = inputs.nixpkgs.legacyPackages.${system};
-        in
         {
           inherit (cli.packages.${system}) iam-ra-cli;
-          inherit (cdk.packages.${system}) iam-ra-cdk;
-
-          # Default: combined CLI + CDK
-          default = pkgs.symlinkJoin {
-            name = "iam-roles-anywhere";
-            paths = [
-              cli.packages.${system}.iam-ra-cli
-              cdk.packages.${system}.iam-ra-cdk
-            ];
-          };
+          default = cli.packages.${system}.iam-ra-cli;
         }
       );
 
       # ===== DEV SHELLS =====
       devShells = import ./shells.nix {
-        inherit inputs supportedSystems cli cdk;
+        inherit inputs supportedSystems cli;
       };
 
       # ===== CHECKS =====
       checks = forAllSystems (
         system:
-        import ./tests {
+        import ./nix/checks.nix {
           inherit inputs system self;
         }
       );

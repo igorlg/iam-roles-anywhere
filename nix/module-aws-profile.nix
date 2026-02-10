@@ -2,6 +2,9 @@
 #
 # Configures programs.awscli.settings with the credential_process command.
 # This is a pure function that takes config values and returns a config fragment.
+#
+# Note: This enables programs.awscli which will install awscli2 by default.
+# Users can override the package in their own config if needed.
 {
   lib,
   cfg,
@@ -30,8 +33,8 @@ in
 {
   programs.awscli = {
     enable = true;
-    # Don't install awscli2 again - packages.nix handles that
-    package = lib.mkDefault null;
+    # Let home-manager handle package installation (defaults to awscli2)
+    # Users can override with: programs.awscli.package = pkgs.awscli;
     settings = lib.mkMerge [
       namedProfile
       defaultProfile

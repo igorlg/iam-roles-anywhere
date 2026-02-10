@@ -14,7 +14,7 @@
 
 let
   # Import option definitions
-  optionDefs = import ./options.nix { inherit lib; };
+  optionDefs = import ./module-options.nix { inherit lib; };
 
   # ===================
   # HOME-MANAGER MODULE
@@ -36,7 +36,7 @@ let
     }:
     let
       cfg = config.programs.iamRolesAnywhere;
-      iamRaLib = import ../lib { inherit lib; };
+      iamRaLib = import ./lib.nix { inherit lib; };
 
       # Build the credential_process command
       credentialProcessCommand = iamRaLib.mkCredentialProcessCommand {
@@ -51,9 +51,9 @@ let
       };
 
       # Import component modules
-      packagesConfig = import ./packages.nix { inherit pkgs; };
-      awsProfileConfig = import ./aws-profile.nix { inherit lib cfg credentialProcessCommand; };
-      validationConfig = import ./validation.nix { inherit lib cfg iamRaLib; };
+      packagesConfig = import ./module-packages.nix { inherit pkgs; };
+      awsProfileConfig = import ./module-aws-profile.nix { inherit lib cfg credentialProcessCommand; };
+      validationConfig = import ./module-validation.nix { inherit lib cfg iamRaLib; };
     in
     {
       options.programs.iamRolesAnywhere = optionDefs;

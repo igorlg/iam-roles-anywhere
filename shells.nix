@@ -1,9 +1,9 @@
 # Development Shell
 #
-# Combines dev dependencies from CLI and CDK packages with shared tooling.
+# Combines dev dependencies from CLI package with shared tooling.
 #
 # Usage: nix develop
-{ inputs, supportedSystems, cli, cdk }:
+{ inputs, supportedSystems, cli }:
 let
   inherit (inputs.nixpkgs) lib;
   forAllSystems = lib.genAttrs supportedSystems;
@@ -18,7 +18,6 @@ forAllSystems (
       packages =
         # Package-specific dev dependencies
         cli.devShellPackages.${system}
-        ++ cdk.devShellPackages.${system}
         ++ [
           # Task runner
           pkgs.just
@@ -37,6 +36,9 @@ forAllSystems (
 
           # SOPS for secrets
           pkgs.sops
+
+          # CloudFormation linting
+          # pkgs.cfn-lint
         ];
 
       env = {
@@ -49,9 +51,9 @@ forAllSystems (
         echo ""
         echo "Available tools:"
         echo "  iam-ra    - CLI for IAM Roles Anywhere"
-        echo "  cdk       - AWS CDK CLI"
         echo "  aws       - AWS CLI"
         echo "  just      - Task runner"
+        echo "  cfn-lint  - CloudFormation linter"
         echo ""
         echo "For Python development with hot-reload:"
         echo "  uv sync && source .venv/bin/activate"
