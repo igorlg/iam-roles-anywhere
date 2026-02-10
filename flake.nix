@@ -9,18 +9,16 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    # Python packaging - single source of truth from pyproject.toml + uv.lock
+    # Python packaging (uv2nix)
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
     uv2nix = {
       url = "github:pyproject-nix/uv2nix";
       inputs.pyproject-nix.follows = "pyproject-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
     pyproject-build-systems = {
       url = "github:pyproject-nix/build-system-pkgs";
       inputs.pyproject-nix.follows = "pyproject-nix";
@@ -30,17 +28,9 @@
   };
 
   outputs =
-    {
-      self,
-      nixpkgs,
-      home-manager,
-      pyproject-nix,
-      uv2nix,
-      pyproject-build-systems,
-      ...
-    }:
+    { self, ... }@inputs:
     let
-      inherit (nixpkgs) lib;
+      inherit (inputs.nixpkgs) lib;
 
       supportedSystems = [
         "x86_64-linux"
@@ -49,82 +39,43 @@
         "aarch64-darwin"
       ];
 
-      # IAM RA CLI package (Python, built with uv2nix)
-      iamRaCli = import ./iam-ra-cli/nix {
-        inherit
-          lib
-          nixpkgs
-          pyproject-nix
-          uv2nix
-          pyproject-build-systems
-          supportedSystems
-          ;
-      };
+      forAllSystems = lib.genAttrs supportedSystems;
+
+      # Import CLI package - returns { packages.${system}, devShellPackages.${system} }
+      cli = import ./nix/package.nix { inherit inputs supportedSystems; };
 
       # Import module definitions
-      modules = import ./modules { inherit lib; };
+      modules = import ./nix/module.nix { inherit lib; };
     in
     {
-      # ===================
-      # LIBRARY FUNCTIONS
-      # ===================
+      # ===== LIBRARY =====
+      lib = import ./nix/lib.nix { inherit lib; };
 
-      lib = import ./lib { inherit lib; };
-
-      # ===================
-      # MODULES
-      # ===================
-
-      # Home-manager module - for direct use in home-manager configurations
-      # Usage: programs.iamRolesAnywhere = { enable = true; ... };
+      # ===== MODULES =====
       homeModules.default = modules.homeModule;
-
-      # NixOS module - adds 'user' option and wires to home-manager
-      # Usage: programs.iamRolesAnywhere = { enable = true; user = "alice"; ... };
       nixosModules.default = modules.systemModule;
-
-      # Darwin module - same as NixOS, works on macOS with nix-darwin
       darwinModules.default = modules.systemModule;
 
-      # ===================
-      # PACKAGES
-      # ===================
+      # ===== PACKAGES =====
+      packages = forAllSystems (system: {
+        inherit (cli.packages.${system}) iam-ra-cli;
+        default = cli.packages.${system}.iam-ra-cli;
+      });
 
-      packages = iamRaCli.packages;
+      # ===== DEV SHELLS =====
+      devShells = import ./shells.nix {
+        inherit inputs supportedSystems cli;
+      };
 
-      # ===================
-      # TESTS
-      # ===================
-
-      checks = lib.genAttrs supportedSystems (
+      # ===== CHECKS =====
+      checks = forAllSystems (
         system:
-        import ./tests {
-          inherit
-            self
-            nixpkgs
-            home-manager
-            system
-            ;
+        import ./nix/checks.nix {
+          inherit inputs system self;
         }
       );
 
-      # ===================
-      # DEV SHELL
-      # ===================
-
-      devShells = import ./shells.nix {
-        inherit
-          lib
-          nixpkgs
-          iamRaCli
-          supportedSystems
-          ;
-      };
-
-      # ===================
-      # FORMATTER
-      # ===================
-
-      formatter = lib.genAttrs supportedSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);
+      # ===== FORMATTER =====
+      formatter = forAllSystems (system: inputs.nixpkgs.legacyPackages.${system}.nixfmt-rfc-style);
     };
 }

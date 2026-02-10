@@ -1,0 +1,70 @@
+[project]
+name = "iam-ra-cli"
+version = "0.1.0"
+description = "CLI for managing IAM Roles Anywhere infrastructure"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1.0",
+    "boto3>=1.34.0",
+    "rich>=13.0.0",
+    "pyyaml>=6.0.0",
+    "cryptography>=42.0.0",
+]
+
+[project.scripts]
+iam-ra = "iam_ra_cli.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/iam_ra_cli"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "moto[all]>=5.0.0",
+    "mypy>=1.5.0",
+    "ruff>=0.4.0",
+    "boto3-stubs[cloudformation,s3,ssm,secretsmanager,sts]>=1.34.0",
+    "types-pyyaml>=6.0.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",   # Line length handled by formatter
+    "UP046",  # Generic class uses Generic subclass - keep for Python 3.11 compat
+    "UP047",  # Generic function type params - keep for Python 3.11 compat
+    "SIM108", # Ternary operator - prefer explicit if/else for readability
+    "B905",   # zip strict - not always needed
+    "B007",   # Loop control variable not used - sometimes intentional
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+# Disable errors that don't work well with our Result pattern matching
+disable_error_code = ["misc", "union-attr", "arg-type", "return-value"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

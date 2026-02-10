@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: IAM Roles Anywhere - Root CA (New ACM PCA)
+
+Parameters:
+  Namespace:
+    Type: String
+    Description: Namespace identifier
+
+  KeyAlgorithm:
+    Type: String
+    Default: EC_prime256v1
+    AllowedValues:
+      - RSA_2048
+      - RSA_4096
+      - EC_prime256v1
+      - EC_secp384r1
+    Description: Key algorithm for the CA
+
+  ValidityYears:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 30
+    Description: CA certificate validity in years
+
+  CommonName:
+    Type: String
+    Default: "IAM Roles Anywhere CA"
+    Description: CA certificate common name
+
+Outputs:
+  Version:
+    Description: Template version
+    Value: "0.1.0"
+
+  TrustAnchorArn:
+    Description: IAM Roles Anywhere Trust Anchor ARN
+    Value: !GetAtt TrustAnchor.TrustAnchorArn
+
+  PCAArn:
+    Description: ACM PCA Certificate Authority ARN
+    Value: !Ref CertificateAuthority
+
+  CAMode:
+    Description: CA mode
+    Value: pca-new
+
+Resources:
+  CertificateAuthority:
+    Type: AWS::ACMPCA::CertificateAuthority
+    Properties:
+      Type: ROOT
+      KeyAlgorithm: !Ref KeyAlgorithm
+      SigningAlgorithm: !If
+        - IsECKey
+        - SHA256WITHECDSA
+        - SHA256WITHRSA
+      Subject:
+        CommonName: !Ref CommonName
+      Tags:
+        - Key: iam-ra:namespace
+          Value: !Ref Namespace
+
+  CertificateAuthorityCertificate:
+    Type: AWS::ACMPCA::Certificate
+    Properties:
+      CertificateAuthorityArn: !Ref CertificateAuthority
+      CertificateSigningRequest: !GetAtt CertificateAuthority.CertificateSigningRequest
+      SigningAlgorithm: !If
+        - IsECKey
+        - SHA256WITHECDSA
+        - SHA256WITHRSA
+      TemplateArn: arn:aws:acm-pca:::template/RootCACertificate/V1
+      Validity:
+        Type: YEARS
+        Value: !Ref ValidityYears
+
+  CertificateAuthorityActivation:
+    Type: AWS::ACMPCA::CertificateAuthorityActivation
+    Properties:
+      CertificateAuthorityArn: !Ref CertificateAuthority
+      Certificate: !GetAtt CertificateAuthorityCertificate.Certificate
+      Status: ACTIVE
+
+  TrustAnchor:
+    Type: AWS::RolesAnywhere::TrustAnchor
+    DependsOn: CertificateAuthorityActivation
+    Properties:
+      Name: !Sub "iam-ra-${Namespace}"
+      Enabled: true
+      Source:
+        SourceType: AWS_ACM_PCA
+        SourceData:
+          AcmPcaArn: !Ref CertificateAuthority
+      Tags:
+        - Key: iam-ra:namespace
+          Value: !Ref Namespace
+
+  TrustAnchorArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/iam-ra/${Namespace}/trust-anchor-arn"
+      Type: String
+      Value: !GetAtt TrustAnchor.TrustAnchorArn
+
+  PCAArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/iam-ra/${Namespace}/pca-arn"
+      Type: String
+      Value: !Ref CertificateAuthority
+
+Conditions:
+  IsECKey: !Or
+    - !Equals [!Ref KeyAlgorithm, EC_prime256v1]
+    - !Equals [!Ref KeyAlgorithm, EC_secp384r1]

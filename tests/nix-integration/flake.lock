@@ -7,6 +7,27 @@
         ]
       },
       "locked": {
+        "lastModified": 1770654520,
+        "narHash": "sha256-mg5WZMIPGsFu9MxSrUcuJUPMbfMsF77el5yb/7rc10k=",
+        "owner": "nix-community",
+        "repo": "home-manager",
+        "rev": "6c4fdbe1ad198fac36c320fd45c5957324a80b8e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "home-manager",
+        "type": "github"
+      }
+    },
+    "home-manager_2": {
+      "inputs": {
+        "nixpkgs": [
+          "iam-ra",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
         "lastModified": 1769978395,
         "narHash": "sha256-gj1yP3spUb1vGtaF5qPhshd2j0cg4xf51pklDsIm19Q=",
         "owner": "nix-community",
@@ -19,6 +40,24 @@
         "repo": "home-manager",
         "type": "github"
       }
+    },
+    "iam-ra": {
+      "inputs": {
+        "home-manager": "home-manager_2",
+        "nixpkgs": "nixpkgs",
+        "pyproject-build-systems": "pyproject-build-systems",
+        "pyproject-nix": "pyproject-nix",
+        "uv2nix": "uv2nix"
+      },
+      "locked": {
+        "path": "../..",
+        "type": "path"
+      },
+      "original": {
+        "path": "../..",
+        "type": "path"
+      },
+      "parent": []
     },
     "nixpkgs": {
       "locked": {
@@ -36,15 +75,34 @@
         "type": "github"
       }
     },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1770562336,
+        "narHash": "sha256-ub1gpAONMFsT/GU2hV6ZWJjur8rJ6kKxdm9IlCT0j84=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "d6c71932130818840fc8fe9509cf50be8c64634f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "pyproject-build-systems": {
       "inputs": {
         "nixpkgs": [
+          "iam-ra",
           "nixpkgs"
         ],
         "pyproject-nix": [
+          "iam-ra",
           "pyproject-nix"
         ],
         "uv2nix": [
+          "iam-ra",
           "uv2nix"
         ]
       },
@@ -65,6 +123,7 @@
     "pyproject-nix": {
       "inputs": {
         "nixpkgs": [
+          "iam-ra",
           "nixpkgs"
         ]
       },
@@ -85,18 +144,18 @@
     "root": {
       "inputs": {
         "home-manager": "home-manager",
-        "nixpkgs": "nixpkgs",
-        "pyproject-build-systems": "pyproject-build-systems",
-        "pyproject-nix": "pyproject-nix",
-        "uv2nix": "uv2nix"
+        "iam-ra": "iam-ra",
+        "nixpkgs": "nixpkgs_2"
       }
     },
     "uv2nix": {
       "inputs": {
         "nixpkgs": [
+          "iam-ra",
           "nixpkgs"
         ],
         "pyproject-nix": [
+          "iam-ra",
           "pyproject-nix"
         ]
       },

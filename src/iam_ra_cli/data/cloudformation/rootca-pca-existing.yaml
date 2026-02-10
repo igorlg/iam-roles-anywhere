@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: IAM Roles Anywhere - Root CA (Existing ACM PCA)
+
+Parameters:
+  Namespace:
+    Type: String
+    Description: Namespace identifier
+
+  PCAArn:
+    Type: String
+    Description: Existing ACM PCA Certificate Authority ARN
+
+Outputs:
+  Version:
+    Description: Template version
+    Value: "0.1.0"
+
+  TrustAnchorArn:
+    Description: IAM Roles Anywhere Trust Anchor ARN
+    Value: !GetAtt TrustAnchor.TrustAnchorArn
+
+  PCAArn:
+    Description: ACM PCA Certificate Authority ARN
+    Value: !Ref PCAArn
+
+  CAMode:
+    Description: CA mode
+    Value: pca-existing
+
+Resources:
+  TrustAnchor:
+    Type: AWS::RolesAnywhere::TrustAnchor
+    Properties:
+      Name: !Sub "iam-ra-${Namespace}"
+      Enabled: true
+      Source:
+        SourceType: AWS_ACM_PCA
+        SourceData:
+          AcmPcaArn: !Ref PCAArn
+      Tags:
+        - Key: iam-ra:namespace
+          Value: !Ref Namespace
+
+  TrustAnchorArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/iam-ra/${Namespace}/trust-anchor-arn"
+      Type: String
+      Value: !GetAtt TrustAnchor.TrustAnchorArn
+
+  PCAArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/iam-ra/${Namespace}/pca-arn"
+      Type: String
+      Value: !Ref PCAArn

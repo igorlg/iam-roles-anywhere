@@ -31,6 +31,14 @@ fmt-check:
 check:
     nix flake check --print-build-logs
 
+# Run Python tests
+test:
+    uv run pytest tests/ -v
+
+# Run Python tests with coverage
+test-cov:
+    uv run pytest tests/ -v --cov=src/iam_ra_cli --cov-report=term-missing
+
 # Run checks for specific system (e.g., just check-system x86_64-linux)
 check-system system:
     nix flake check --print-build-logs --system {{system}}
@@ -51,17 +59,13 @@ run *args:
 # CLI DEVELOPMENT
 # ===================
 
-# Run CLI tests (via uv in iam-ra-cli directory)
-cli-test:
-    cd iam-ra-cli && uv run pytest
+# Sync CLI dependencies
+sync:
+    uv sync --all-extras
 
 # Update CLI dependencies
-cli-lock:
-    cd iam-ra-cli && uv lock
-
-# Sync CLI dependencies
-cli-sync:
-    cd iam-ra-cli && uv sync --all-extras
+lock:
+    uv lock
 
 # ===================
 # CLOUDFORMATION
@@ -69,7 +73,23 @@ cli-sync:
 
 # Lint CloudFormation templates
 cfn-lint:
-    cfn-lint iam-ra-cli/iam_ra_cli/data/cloudformation/*.yaml
+    cfn-lint src/iam_ra_cli/data/cloudformation/*.yaml
+
+# ===================
+# VERSIONING
+# ===================
+
+# Check if all versions are in sync
+version-check:
+    ./scripts/sync-version.py --check
+
+# Sync VERSION to all files
+version-sync:
+    ./scripts/sync-version.py
+
+# Set new version and sync (e.g., just version 0.2.0)
+version ver:
+    ./scripts/sync-version.py {{ver}}
 
 # ===================
 # RELEASE
@@ -90,8 +110,9 @@ update-input input:
 # Remove build artifacts
 clean:
     rm -rf result
-    rm -rf iam-ra-cli/.venv
-    rm -rf iam-ra-cli/*.egg-info
+    rm -rf .venv
+    rm -rf *.egg-info
+    rm -rf src/*.egg-info
 
 # Garbage collect Nix store
 gc:
