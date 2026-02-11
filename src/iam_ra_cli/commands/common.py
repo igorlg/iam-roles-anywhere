@@ -16,6 +16,12 @@ from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     HostAlreadyExistsError,
     HostNotFoundError,
+    K8sClusterAlreadyExistsError,
+    K8sClusterInUseError,
+    K8sClusterNotFoundError,
+    K8sUnsupportedCAModeError,
+    K8sWorkloadAlreadyExistsError,
+    K8sWorkloadNotFoundError,
     NotInitializedError,
     RoleAlreadyExistsError,
     RoleInUseError,
@@ -145,6 +151,25 @@ def _format_error(error: Any) -> str:
 
         case HostAlreadyExistsError(namespace, hostname):
             return f"Host '{hostname}' already exists in namespace '{namespace}'. Use --overwrite to replace."
+
+        case K8sClusterNotFoundError(cluster_name):
+            return f"K8s cluster '{cluster_name}' not found. Run 'iam-ra k8s setup {cluster_name}' first."
+
+        case K8sClusterAlreadyExistsError(cluster_name):
+            return f"K8s cluster '{cluster_name}' already exists."
+
+        case K8sClusterInUseError(cluster_name, workloads):
+            workloads_str = ", ".join(workloads)
+            return f"K8s cluster '{cluster_name}' is in use by workloads: {workloads_str}. Offboard them first."
+
+        case K8sWorkloadNotFoundError(workload_name):
+            return f"K8s workload '{workload_name}' not found."
+
+        case K8sWorkloadAlreadyExistsError(workload_name):
+            return f"K8s workload '{workload_name}' already exists."
+
+        case K8sUnsupportedCAModeError(ca_mode):
+            return f"CA mode '{ca_mode}' is not supported for K8s. Only 'self-signed' is supported."
 
         case StackDeployError(stack_name, status, reason):
             return f"Failed to deploy stack '{stack_name}': {status} - {reason}"
