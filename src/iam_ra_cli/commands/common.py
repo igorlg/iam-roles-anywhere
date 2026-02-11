@@ -26,7 +26,9 @@ from iam_ra_cli.lib.errors import (
     RoleAlreadyExistsError,
     RoleInUseError,
     RoleNotFoundError,
-    SecretsError,
+    SecretsFileExistsError,
+    SecretsManagerReadError,
+    SOPSEncryptError,
     StackDeleteError,
     StackDeployError,
     StateLoadError,
@@ -177,14 +179,20 @@ def _format_error(error: Any) -> str:
         case StackDeleteError(stack_name, status, reason):
             return f"Failed to delete stack '{stack_name}': {status} - {reason}"
 
-        case StateLoadError(reason):
-            return f"Failed to load state: {reason}"
+        case StateLoadError(namespace, reason):
+            return f"Failed to load state for '{namespace}': {reason}"
 
-        case StateSaveError(reason):
-            return f"Failed to save state: {reason}"
+        case StateSaveError(namespace, reason):
+            return f"Failed to save state for '{namespace}': {reason}"
 
-        case SecretsError(reason):
-            return f"Secrets error: {reason}"
+        case SecretsManagerReadError(secret_arn, reason):
+            return f"Failed to read secret '{secret_arn}': {reason}"
+
+        case SOPSEncryptError(path, reason):
+            return f"SOPS encryption failed for '{path}': {reason}"
+
+        case SecretsFileExistsError(path):
+            return f"Secrets file already exists: {path}"
 
         case _:
             return str(error)
