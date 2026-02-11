@@ -1,10 +1,10 @@
 # IAM Roles Anywhere - Nix Flake
 
-Certificate-based AWS authentication for Nix hosts using [AWS IAM Roles Anywhere](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/introduction.html).
+Certificate-based AWS authentication for Nix hosts and Kubernetes using [AWS IAM Roles Anywhere](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/introduction.html).
 
 ## Overview
 
-This flake provides two components:
+This flake provides three components:
 
 ### 1. Nix Modules (Runtime - installed on hosts)
 
@@ -20,6 +20,14 @@ A CLI for **managing** IAM Roles Anywhere infrastructure:
 - Initialize AWS infrastructure (CloudFormation stacks)
 - Create roles with Roles Anywhere profiles
 - Onboard hosts (generate certificates, deploy stacks, create SOPS files)
+- **Onboard Kubernetes workloads** (generate cert-manager manifests)
+
+### 3. Kubernetes Integration
+
+Generate manifests for Kubernetes workloads to use IAM Roles Anywhere:
+- cert-manager Issuer and Certificate resources
+- Sidecar-based credential delivery
+- Works with any K8s cluster (on-prem, self-managed, EKS)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -29,16 +37,25 @@ A CLI for **managing** IAM Roles Anywhere infrastructure:
 │  │               │    - iam-ra init                             │
 │  │               │    - iam-ra role create <name>               │
 │  │               │    - iam-ra host onboard <hostname>          │
+│  │               │    - iam-ra k8s setup <cluster>              │
+│  │               │    - iam-ra k8s onboard <workload>           │
 │  └───────────────┘                                              │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│                      ALL IAM-RA HOSTS                           │
+│                      NIX HOSTS                                  │
 │  ┌───────────────┐                                              │
 │  │  Nix Modules  │  ← Uses IAM Roles Anywhere                   │
 │  │               │    - aws-signing-helper                      │
 │  │               │    - ~/.aws/config (multi-profile)           │
-│  │               │    - awscli2, openssl                        │
+│  └───────────────┘                                              │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                      KUBERNETES CLUSTERS                        │
+│  ┌───────────────┐                                              │
+│  │  cert-manager │  ← Issues certificates                       │
+│  │  + sidecar    │  ← aws_signing_helper serves credentials     │
 │  └───────────────┘                                              │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -184,9 +201,15 @@ Commands:
     onboard   Onboard host (cert + stack + SOPS)
     offboard  Remove host
     list      List all hosts
+  k8s       Manage Kubernetes integration
+    setup     Set up cluster (CA + Issuer)
+    teardown  Remove cluster from state
+    onboard   Onboard workload (Certificate + Pod)
+    offboard  Remove workload from state
+    list      List clusters and workloads
 ```
 
-### Examples
+### Host Examples
 
 ```bash
 # Initialize with self-signed CA (default)
@@ -212,6 +235,27 @@ iam-ra host offboard webserver
 iam-ra role delete deploy
 iam-ra destroy --yes
 ```
+
+### Kubernetes Examples
+
+```bash
+# Set up a K8s cluster (once per cluster)
+iam-ra k8s setup prod-cluster | kubectl apply -f -
+
+# Onboard workloads
+iam-ra k8s onboard payment-service --role admin --cluster prod-cluster | kubectl apply -f -
+iam-ra k8s onboard api-gateway --role readonly --cluster prod-cluster -k gateway | kubectl apply -f -
+
+# List K8s resources
+iam-ra k8s list
+iam-ra k8s list --cluster prod-cluster
+
+# Clean up
+iam-ra k8s offboard payment-service
+iam-ra k8s teardown prod-cluster
+```
+
+See [docs/KUBERNETES.md](docs/KUBERNETES.md) for detailed Kubernetes documentation.
 
 ## Module Configuration
 
@@ -339,6 +383,11 @@ iam-roles-anywhere/
 ├── flake.nix
 ├── README.md
 ├── VERSION
+├── docs/
+│   └── KUBERNETES.md        # K8s integration guide
+├── examples/
+│   ├── hosts/               # Nix host configurations
+│   └── k8s/                 # Kubernetes manifests
 ├── nix/
 │   ├── package.nix           # CLI package (uv2nix)
 │   ├── module.nix            # Module exports
