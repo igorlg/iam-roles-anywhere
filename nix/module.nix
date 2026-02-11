@@ -5,11 +5,11 @@
 #   - systemModule: for NixOS/Darwin system-level use (adds 'user' option)
 #
 # Architecture:
-#   options.nix      → Option definitions (the API surface)
-#   packages.nix     → Package installation
-#   aws-profile.nix  → AWS CLI profile configuration
-#   validation.nix   → ARN validation and warnings
-#   default.nix      → This file (orchestration)
+#   module-options.nix     → Option definitions (the API surface)
+#   module-packages.nix    → Package installation
+#   module-aws-profile.nix → AWS CLI profile configuration (multi-profile)
+#   module-validation.nix  → ARN validation and warnings
+#   module.nix             → This file (orchestration)
 { lib }:
 
 let
@@ -24,7 +24,11 @@ let
   #   programs.iamRolesAnywhere = {
   #     enable = true;
   #     certificate.certPath = "/path/to/cert.pem";
-  #     ...
+  #     trustAnchorArn = "arn:aws:rolesanywhere:...";
+  #     region = "ap-southeast-2";
+  #     profiles = {
+  #       admin = { profileArn = "..."; roleArn = "..."; };
+  #     };
   #   };
 
   homeModule =
@@ -38,21 +42,12 @@ let
       cfg = config.programs.iamRolesAnywhere;
       iamRaLib = import ./lib.nix { inherit lib; };
 
-      # Build the credential_process command
-      credentialProcessCommand = iamRaLib.mkCredentialProcessCommand {
-        signingHelperPath = "${pkgs.aws-signing-helper}/bin/aws_signing_helper";
-        certificatePath = toString cfg.certificate.certPath;
-        privateKeyPath = toString cfg.certificate.keyPath;
-        trustAnchorArn = cfg.aws.trustAnchorArn;
-        profileArn = cfg.aws.profileArn;
-        roleArn = cfg.aws.roleArn;
-        region = cfg.aws.region;
-        sessionDuration = cfg.aws.sessionDuration;
-      };
-
       # Import component modules
       packagesConfig = import ./module-packages.nix { inherit pkgs; };
-      awsProfileConfig = import ./module-aws-profile.nix { inherit lib cfg credentialProcessCommand; };
+      awsProfileConfig = import ./module-aws-profile.nix {
+        inherit lib cfg pkgs;
+        inherit (iamRaLib) mkCredentialProcessCommand;
+      };
       validationConfig = import ./module-validation.nix { inherit lib cfg iamRaLib; };
     in
     {
@@ -77,7 +72,12 @@ let
   #     enable = true;
   #     user = "alice";
   #     certificate.certPath = config.sops.secrets."iam-ra/cert".path;
-  #     ...
+  #     trustAnchorArn = "arn:aws:rolesanywhere:...";
+  #     region = "ap-southeast-2";
+  #     profiles = {
+  #       admin = { profileArn = "..."; roleArn = "..."; makeDefault = true; };
+  #       readonly = { profileArn = "..."; roleArn = "..."; };
+  #     };
   #   };
 
   systemModule =
@@ -109,23 +109,12 @@ let
             certificate = {
               inherit (cfg.certificate) certPath keyPath;
             };
-            aws = {
-              inherit (cfg.aws)
-                region
-                trustAnchorArn
-                profileArn
-                roleArn
-                sessionDuration
-                ;
-            };
-            awsProfile = {
-              inherit (cfg.awsProfile)
-                name
-                makeDefault
-                output
-                extraConfig
-                ;
-            };
+            inherit (cfg)
+              trustAnchorArn
+              region
+              sessionDuration
+              profiles
+              ;
           };
         };
 
