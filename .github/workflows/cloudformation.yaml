@@ -1,0 +1,31 @@
+# CloudFormation - Validate and lint SAM/CloudFormation templates
+
+name: CloudFormation
+
+on:
+  push:
+    paths:
+      - 'src/iam_ra_cli/data/cloudformation/**'
+  pull_request:
+    paths:
+      - 'src/iam_ra_cli/data/cloudformation/**'
+
+jobs:
+  validate:
+    name: Validate Templates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+
+      - name: Lint CloudFormation templates
+        run: |
+          cfn-lint src/iam_ra_cli/data/cloudformation/*.yaml

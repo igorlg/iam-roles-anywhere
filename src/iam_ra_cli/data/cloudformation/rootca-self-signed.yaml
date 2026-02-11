@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: IAM Roles Anywhere - Root CA (Self-Signed)
+
+Parameters:
+  Namespace:
+    Type: String
+    Description: Namespace identifier
+
+  CACertificateS3Key:
+    Type: String
+    Description: S3 object key for CA certificate
+
+Outputs:
+  Version:
+    Description: Template version
+    Value: "0.1.0"
+
+  TrustAnchorArn:
+    Description: IAM Roles Anywhere Trust Anchor ARN
+    Value: !GetAtt TrustAnchor.TrustAnchorArn
+
+  CAMode:
+    Description: CA mode
+    Value: self-signed
+
+Resources:
+  # Fetch CA certificate from S3 using the Fetcher Lambda from init stack
+  CACertificate:
+    Type: Custom::S3Fetch
+    Properties:
+      ServiceToken: !Sub "{{resolve:ssm:/iam-ra/${Namespace}/fetcher-function-arn}}"
+      Key: !Ref CACertificateS3Key
+
+  TrustAnchor:
+    Type: AWS::RolesAnywhere::TrustAnchor
+    Properties:
+      Name: !Sub "iam-ra-${Namespace}"
+      Enabled: true
+      Source:
+        SourceType: CERTIFICATE_BUNDLE
+        SourceData:
+          X509CertificateData: !GetAtt CACertificate.Content
+      Tags:
+        - Key: iam-ra:namespace
+          Value: !Ref Namespace
+
+  TrustAnchorArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/iam-ra/${Namespace}/trust-anchor-arn"
+      Type: String
+      Value: !GetAtt TrustAnchor.TrustAnchorArn

@@ -1,0 +1,82 @@
+# CI - Run tests on all branch commits (except main)
+#
+# Runs nix flake check on supported Linux platforms.
+# Darwin is excluded due to lack of GitHub-hosted macOS runners with Nix.
+
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Nix Check (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Run flake check
+        run: nix flake check --print-build-logs
+
+  # Separate job for building packages to ensure they work
+  build:
+    name: Build (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build iam-ra-cli
+        run: nix build .#iam-ra-cli --print-build-logs
+
+      - name: Verify CLI runs
+        run: nix run .#iam-ra-cli -- --help
+
+  # Format check
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Check Nix formatting
+        run: |
+          nix fmt -- --check .
