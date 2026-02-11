@@ -175,6 +175,54 @@ class SecretsFileExistsError:
 
 
 # =============================================================================
+# K8s Errors
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class K8sClusterNotFoundError:
+    """K8s cluster not found in state."""
+
+    cluster_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class K8sClusterAlreadyExistsError:
+    """K8s cluster already exists in state."""
+
+    cluster_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class K8sClusterInUseError:
+    """K8s cluster is in use by workloads."""
+
+    cluster_name: str
+    workloads: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class K8sWorkloadNotFoundError:
+    """K8s workload not found in state."""
+
+    workload_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class K8sWorkloadAlreadyExistsError:
+    """K8s workload already exists in state."""
+
+    workload_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class K8sUnsupportedCAModeError:
+    """CA mode not supported for K8s integration."""
+
+    ca_mode: str
+
+
+# =============================================================================
 # State Errors
 # =============================================================================
 
