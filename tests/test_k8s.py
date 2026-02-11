@@ -19,12 +19,10 @@ from iam_ra_cli.lib.k8s import (
 )
 from iam_ra_cli.lib.result import Err, Ok
 from iam_ra_cli.models import (
-    Arn,
     CA,
+    Arn,
     CAMode,
     Init,
-    K8sCluster,
-    K8sWorkload,
     Role,
     State,
 )
@@ -35,7 +33,6 @@ from iam_ra_cli.workflows.k8s import (
     setup,
     teardown,
 )
-
 
 # =============================================================================
 # Fixtures

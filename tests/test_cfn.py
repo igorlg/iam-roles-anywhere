@@ -14,7 +14,7 @@ from iam_ra_cli.lib.cfn import (
     get_stack_status,
     stack_exists,
 )
-from iam_ra_cli.lib.result import Err, Ok
+from iam_ra_cli.lib.result import Ok
 
 
 @pytest.fixture

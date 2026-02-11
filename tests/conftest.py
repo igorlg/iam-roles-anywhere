@@ -44,7 +44,6 @@ def temp_xdg_dirs(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def mock_aws_context(aws_credentials, temp_xdg_dirs):
     """Create a complete mocked AWS context."""
-    import boto3
 
     from iam_ra_cli.lib.aws import AwsContext
 

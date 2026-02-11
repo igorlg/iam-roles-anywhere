@@ -15,9 +15,7 @@ def get_cloudformation_path() -> Path:
     """
     # Use importlib.resources to get the path to package data
     # This works whether installed as a package or run from source
-    with resources.as_file(
-        resources.files("iam_ra_cli.data") / "cloudformation"
-    ) as cfn_path:
+    with resources.as_file(resources.files("iam_ra_cli.data") / "cloudformation") as cfn_path:
         # Return a copy of the path that persists after the context manager
         return Path(cfn_path)
 
