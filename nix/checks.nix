@@ -13,7 +13,11 @@ let
   testArns = {
     trustAnchor = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/00000000-0000-0000-0000-000000000001";
     profile = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/00000000-0000-0000-0000-000000000002";
+    profileAdmin = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/00000000-0000-0000-0000-000000000003";
+    profileReadonly = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/00000000-0000-0000-0000-000000000004";
     role = "arn:aws:iam::123456789012:role/test-host-rolesanywhere";
+    roleAdmin = "arn:aws:iam::123456789012:role/admin";
+    roleReadonly = "arn:aws:iam::123456789012:role/readonly";
   };
 
   # Helper to create test home-manager configurations
@@ -189,51 +193,94 @@ let
   # Home Module Config Tests
   # ===================
 
+  # Module disabled by default
   test-home-disabled = mkTestHome {
     extraConfig = {
       # Module should be disabled by default
     };
   };
 
-  test-home-enabled = mkTestHome {
+  # Single profile configuration
+  test-home-single-profile = mkTestHome {
     extraConfig = {
       programs.iamRolesAnywhere = {
         enable = true;
-        aws = {
-          region = "ap-southeast-2";
-          trustAnchorArn = testArns.trustAnchor;
-          profileArn = testArns.profile;
-          roleArn = testArns.role;
-        };
+        trustAnchorArn = testArns.trustAnchor;
+        region = "ap-southeast-2";
         certificate = {
           certPath = "/run/secrets/cert.pem";
           keyPath = "/run/secrets/key.pem";
+        };
+        profiles = {
+          default = {
+            profileArn = testArns.profile;
+            roleArn = testArns.role;
+            makeDefault = true;
+          };
         };
       };
     };
   };
 
-  test-home-custom-profile = mkTestHome {
+  # Multi-profile configuration
+  test-home-multi-profile = mkTestHome {
     extraConfig = {
       programs.iamRolesAnywhere = {
         enable = true;
-        aws = {
-          region = "us-east-1";
-          trustAnchorArn = testArns.trustAnchor;
-          profileArn = testArns.profile;
-          roleArn = testArns.role;
-          sessionDuration = 900;
+        trustAnchorArn = testArns.trustAnchor;
+        region = "ap-southeast-2";
+        certificate = {
+          certPath = "/run/secrets/cert.pem";
+          keyPath = "/run/secrets/key.pem";
         };
+        profiles = {
+          admin = {
+            profileArn = testArns.profileAdmin;
+            roleArn = testArns.roleAdmin;
+            makeDefault = true;
+          };
+          readonly = {
+            profileArn = testArns.profileReadonly;
+            roleArn = testArns.roleReadonly;
+          };
+        };
+      };
+    };
+  };
+
+  # Multi-profile with custom settings
+  test-home-multi-profile-custom = mkTestHome {
+    extraConfig = {
+      programs.iamRolesAnywhere = {
+        enable = true;
+        trustAnchorArn = testArns.trustAnchor;
+        region = "us-east-1";
+        sessionDuration = 3600;
         certificate = {
           certPath = "/custom/path/cert.pem";
           keyPath = "/custom/path/key.pem";
         };
-        awsProfile = {
-          name = "custom-profile";
-          makeDefault = true;
-          output = "yaml";
-          extraConfig = {
-            cli_pager = "";
+        profiles = {
+          admin = {
+            profileArn = testArns.profileAdmin;
+            roleArn = testArns.roleAdmin;
+            makeDefault = true;
+            output = "yaml";
+            extraConfig = {
+              cli_pager = "";
+            };
+          };
+          readonly = {
+            profileArn = testArns.profileReadonly;
+            roleArn = testArns.roleReadonly;
+            awsProfileName = "ro"; # Custom profile name
+            sessionDuration = 900; # Override global
+          };
+          deploy = {
+            profileArn = testArns.profile;
+            roleArn = testArns.role;
+            sessionDuration = 7200;
+            output = "json";
           };
         };
       };
@@ -254,6 +301,7 @@ in
 
   # Home module config tests
   iam-ra-home-disabled = test-home-disabled;
-  iam-ra-home-enabled = test-home-enabled;
-  iam-ra-home-custom-profile = test-home-custom-profile;
+  iam-ra-home-single-profile = test-home-single-profile;
+  iam-ra-home-multi-profile = test-home-multi-profile;
+  iam-ra-home-multi-profile-custom = test-home-multi-profile-custom;
 }

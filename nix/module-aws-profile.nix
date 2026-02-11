@@ -1,43 +1,68 @@
 # IAM Roles Anywhere - AWS CLI Profile Configuration
 #
-# Configures programs.awscli.settings with the credential_process command.
-# This is a pure function that takes config values and returns a config fragment.
+# Configures programs.awscli.settings with credential_process commands
+# for each defined profile.
 #
-# Note: This enables programs.awscli which will install awscli2 by default.
-# Users can override the package in their own config if needed.
+# Generates multiple AWS CLI profiles from the profiles attrset,
+# each with its own credential_process pointing to the appropriate role.
 {
   lib,
   cfg,
-  credentialProcessCommand,
+  pkgs,
+  mkCredentialProcessCommand,
 }:
 
 let
-  # Base profile configuration
-  profileConfig = {
-    credential_process = credentialProcessCommand;
-    region = cfg.aws.region;
-    output = cfg.awsProfile.output;
-  }
-  // cfg.awsProfile.extraConfig;
+  # Build credential_process command for a specific profile
+  mkCredentialProcess =
+    profileCfg:
+    mkCredentialProcessCommand {
+      signingHelperPath = "${pkgs.aws-signing-helper}/bin/aws_signing_helper";
+      certificatePath = toString cfg.certificate.certPath;
+      privateKeyPath = toString cfg.certificate.keyPath;
+      trustAnchorArn = cfg.trustAnchorArn;
+      profileArn = profileCfg.profileArn;
+      roleArn = profileCfg.roleArn;
+      region = cfg.region;
+      # Per-profile sessionDuration overrides global
+      sessionDuration =
+        if profileCfg.sessionDuration != null then profileCfg.sessionDuration else cfg.sessionDuration;
+    };
 
-  # Named profile (e.g., "profile iam-ra")
-  namedProfile = {
-    "profile ${cfg.awsProfile.name}" = profileConfig;
-  };
+  # Build AWS CLI config for a single profile
+  mkProfileConfig = name: profileCfg: {
+    credential_process = mkCredentialProcess profileCfg;
+    region = cfg.region;
+    output = profileCfg.output;
+  } // profileCfg.extraConfig;
 
-  # Default profile (optional)
-  defaultProfile = lib.optionalAttrs cfg.awsProfile.makeDefault {
-    default = profileConfig;
-  };
+  # Generate all named profiles
+  # Each profile gets a "profile <name>" entry in AWS config
+  namedProfiles = lib.mapAttrs' (
+    name: profileCfg:
+    lib.nameValuePair "profile ${profileCfg.awsProfileName}" (mkProfileConfig name profileCfg)
+  ) cfg.profiles;
+
+  # Find profiles with makeDefault = true and create [default] entry
+  # (only the first one if multiple are set - validation warns about this)
+  defaultProfiles = lib.filterAttrs (_: p: p.makeDefault) cfg.profiles;
+  defaultProfileConfig =
+    if defaultProfiles != { } then
+      let
+        firstDefault = lib.head (lib.attrValues defaultProfiles);
+      in
+      { default = mkProfileConfig "default" firstDefault; }
+    else
+      { };
+
 in
 {
-  programs.awscli = {
+  programs.awscli = lib.mkIf (cfg.profiles != { }) {
     enable = true;
     # Let home-manager handle package installation (defaults to awscli2)
-    # Users can override with: programs.awscli.package = pkgs.awscli;
     settings = lib.mkMerge [
-      namedProfile
-      defaultProfile
+      namedProfiles
+      defaultProfileConfig
     ];
   };
 }

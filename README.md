@@ -4,30 +4,31 @@ Certificate-based AWS authentication for Nix hosts using [AWS IAM Roles Anywhere
 
 ## Overview
 
-This flake provides two distinct components:
+This flake provides two components:
 
 ### 1. Nix Modules (Runtime - installed on hosts)
 
 Configures hosts to **use** IAM Roles Anywhere for AWS authentication:
 - `aws-signing-helper` - credential process for IAM Roles Anywhere
 - `~/.aws/config` - configured with `credential_process`
+- **Multi-profile support** - one host can assume multiple roles
 - Secrets-manager agnostic - works with SOPS, agenix, or any secret source
 
-### 2. `iam-ra-cli` (Admin Tool - NOT installed on hosts)
+### 2. `iam-ra` CLI (Admin Tool)
 
-A self-contained CLI for **managing** IAM Roles Anywhere infrastructure:
-- Initializes AWS infrastructure (CloudFormation stacks)
-- Onboards new hosts (deploys stack + fetches secrets)
-- Bundles SAM CLI internally - no external dependencies
+A CLI for **managing** IAM Roles Anywhere infrastructure:
+- Initialize AWS infrastructure (CloudFormation stacks)
+- Create roles with Roles Anywhere profiles
+- Onboard hosts (generate certificates, deploy stacks, create SOPS files)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        ADMIN WORKSTATION                        │
 │  ┌───────────────┐                                              │
-│  │  iam-ra-cli   │  ← Manages AWS infrastructure                │
+│  │   iam-ra CLI  │  ← Manages AWS infrastructure                │
 │  │               │    - iam-ra init                             │
-│  │  (installed   │    - iam-ra onboard <host>                   │
-│  │   selectively)│                                              │
+│  │               │    - iam-ra role create <name>               │
+│  │               │    - iam-ra host onboard <hostname>          │
 │  └───────────────┘                                              │
 └─────────────────────────────────────────────────────────────────┘
 
@@ -36,248 +37,299 @@ A self-contained CLI for **managing** IAM Roles Anywhere infrastructure:
 │  ┌───────────────┐                                              │
 │  │  Nix Modules  │  ← Uses IAM Roles Anywhere                   │
 │  │               │    - aws-signing-helper                      │
-│  │  (installed   │    - ~/.aws/config                           │
-│  │   by default) │    - awscli2, openssl                        │
+│  │               │    - ~/.aws/config (multi-profile)           │
+│  │               │    - awscli2, openssl                        │
 │  └───────────────┘                                              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Quick Start
 
-### 1. Initialize Infrastructure (once per AWS account)
+### 1. Initialize Infrastructure (once per namespace)
 
 ```bash
-# From repo root (admin workstation)
-nix run .#iam-ra-cli -- init
-
-# Or if iam-ra-cli is installed:
-iam-ra init
+nix run github:igorlg/iam-roles-anywhere -- init
 ```
 
-### 2. Onboard a Host
+### 2. Create Roles
 
 ```bash
-# Deploys host stack + creates SOPS secrets file
-iam-ra onboard myhost
+iam-ra role create admin --policy arn:aws:iam::aws:policy/AdministratorAccess
+iam-ra role create readonly --policy arn:aws:iam::aws:policy/ReadOnlyAccess
 ```
 
-### 3. Configure Host in Nix
+### 3. Onboard a Host
 
-The module is **secrets-manager agnostic** - it only needs paths to certificate files. Here are examples with different secret managers:
+```bash
+iam-ra host onboard myhost --role admin
+```
 
-#### With SOPS
+This creates:
+- Host CloudFormation stack with certificate in Secrets Manager
+- SOPS-encrypted secrets file: `secrets/hosts/myhost/iam-ra.yaml`
+
+### 4. Configure Host in Nix
 
 ```nix
-{ config, ... }:
+{ config, inputs, ... }:
 {
-  sops.secrets."iam-ra/cert" = {
-    sopsFile = ../../../secrets/hosts/myhost/iam-ra.yaml;
-    key = "certificate";
-  };
-  sops.secrets."iam-ra/key" = {
-    sopsFile = ../../../secrets/hosts/myhost/iam-ra.yaml;
-    key = "private_key";
-  };
+  imports = [ inputs.iam-roles-anywhere.nixosModules.default ];
+
+  # Configure secrets (example with SOPS)
+  sops.secrets."iam-ra/cert".sopsFile = ./secrets/hosts/myhost/iam-ra.yaml;
+  sops.secrets."iam-ra/key".sopsFile = ./secrets/hosts/myhost/iam-ra.yaml;
 
   programs.iamRolesAnywhere = {
     enable = true;
-    user = config.system.primaryUser;  # For NixOS/Darwin system modules
+    user = "alice";
+    
+    # Certificate (shared across all profiles)
     certificate = {
       certPath = config.sops.secrets."iam-ra/cert".path;
       keyPath = config.sops.secrets."iam-ra/key".path;
     };
-    aws = {
-      region = "ap-southeast-2";
-      trustAnchorArn = "arn:aws:rolesanywhere:...";
-      profileArn = "arn:aws:rolesanywhere:...";
-      roleArn = "arn:aws:iam::...:role/...";
+    
+    # Shared settings
+    trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/...";
+    region = "ap-southeast-2";
+    
+    # Multiple profiles - one host can assume different roles
+    profiles = {
+      admin = {
+        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin";
+        roleArn = "arn:aws:iam::123456789012:role/admin";
+        makeDefault = true;  # Also creates [default] profile
+      };
+      readonly = {
+        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/readonly";
+        roleArn = "arn:aws:iam::123456789012:role/readonly";
+      };
     };
   };
 }
 ```
 
-#### With agenix
+### 5. Use AWS CLI
+
+```bash
+# Uses the default profile (admin in this example)
+aws sts get-caller-identity
+
+# Or specify a profile
+aws sts get-caller-identity --profile admin
+aws sts get-caller-identity --profile readonly
+```
+
+## Installation
+
+### Flake Input
 
 ```nix
-{ config, ... }:
 {
-  age.secrets.iam-ra-cert.file = ../../../secrets/iam-ra-cert.age;
-  age.secrets.iam-ra-key.file = ../../../secrets/iam-ra-key.age;
+  inputs.iam-roles-anywhere.url = "github:igorlg/iam-roles-anywhere";
 
-  programs.iamRolesAnywhere = {
-    enable = true;
-    user = "alice";
-    certificate = {
-      certPath = config.age.secrets.iam-ra-cert.path;
-      keyPath = config.age.secrets.iam-ra-key.path;
+  outputs = { self, nixpkgs, iam-roles-anywhere, ... }: {
+    # NixOS
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        iam-roles-anywhere.nixosModules.default
+        ./configuration.nix
+      ];
     };
-    aws = {
-      region = "ap-southeast-2";
-      trustAnchorArn = "arn:aws:rolesanywhere:...";
-      profileArn = "arn:aws:rolesanywhere:...";
-      roleArn = "arn:aws:iam::...:role/...";
+    
+    # Darwin
+    darwinConfigurations.myhost = darwin.lib.darwinSystem {
+      modules = [
+        iam-roles-anywhere.darwinModules.default
+        ./configuration.nix
+      ];
+    };
+    
+    # Home Manager (standalone)
+    homeConfigurations.alice = home-manager.lib.homeManagerConfiguration {
+      modules = [
+        iam-roles-anywhere.homeModules.default
+        ./home.nix
+      ];
     };
   };
 }
 ```
 
-#### With Static Files
-
-```nix
-{
-  programs.iamRolesAnywhere = {
-    enable = true;
-    user = "alice";
-    certificate = {
-      certPath = "/etc/ssl/iam-ra/cert.pem";
-      keyPath = "/etc/ssl/iam-ra/key.pem";
-    };
-    aws = {
-      region = "ap-southeast-2";
-      trustAnchorArn = "arn:aws:rolesanywhere:...";
-      profileArn = "arn:aws:rolesanywhere:...";
-      roleArn = "arn:aws:iam::...:role/...";
-    };
-  };
-}
-```
-
-### 4. Deploy and Test
+### CLI
 
 ```bash
-# Deploy your configuration
-nixos-rebuild switch  # or darwin-rebuild switch
+# Run directly
+nix run github:igorlg/iam-roles-anywhere -- --help
 
-# Test the credentials
-aws sts get-caller-identity --profile iam-ra
-```
-
-## Installing `iam-ra-cli`
-
-The CLI is **not** installed on hosts by default. Install it only on admin workstations:
-
-### Option 1: Run directly (no installation)
-
-```bash
-nix run .#iam-ra-cli -- init
-nix run .#iam-ra-cli -- onboard myhost
-```
-
-### Option 2: In dev shell
-
-```bash
-nix develop
-iam-ra init
-iam-ra onboard myhost
-```
-
-### Option 3: Install on specific host
-
-```nix
-# In host's home-manager config
-{ inputs, ... }:
-{
-  home.packages = [
-    inputs.iam-roles-anywhere.packages.${system}.iam-ra-cli
-  ];
-}
+# Or add to devShell
+nix develop github:igorlg/iam-roles-anywhere
+iam-ra --help
 ```
 
 ## CLI Commands
 
-### `iam-ra init`
+```
+iam-ra [OPTIONS] COMMAND
 
-Initialize IAM Roles Anywhere infrastructure (once per AWS account):
-
-```bash
-iam-ra init                              # Default: self-managed CA
-iam-ra init --ca-mode pca-create         # Create new AWS Private CA
-iam-ra init --ca-mode pca-existing --pca-arn arn:aws:acm-pca:...
-iam-ra init --dry-run                    # Preview changes
+Commands:
+  init      Initialize IAM Roles Anywhere infrastructure
+  destroy   Tear down all infrastructure for a namespace
+  status    Show current status
+  role      Manage IAM roles
+    create  Create role with Roles Anywhere profile
+    delete  Delete role
+    list    List all roles
+  host      Manage hosts
+    onboard   Onboard host (cert + stack + SOPS)
+    offboard  Remove host
+    list      List all hosts
 ```
 
-Deploys:
-- `iam-ra-rootca` - Root CA stack (self-managed or ACM PCA)
-- `iam-ra-account` - Trust Anchor + Certificate Issuer Lambda
-
-### `iam-ra onboard <hostname>`
-
-Onboard a host (deploys stack + creates SOPS secrets):
+### Examples
 
 ```bash
-iam-ra onboard myhost                    # Full onboarding
-iam-ra onboard myhost --dry-run          # Preview changes
-iam-ra onboard myhost --skip-deploy      # Only fetch secrets (stack exists)
-iam-ra onboard myhost --force            # Overwrite existing secrets file
-iam-ra onboard myhost --policy-arns arn:aws:iam::aws:policy/ReadOnlyAccess
+# Initialize with self-signed CA (default)
+iam-ra init
+
+# Initialize with AWS Private CA
+iam-ra init --ca-mode pca-new
+
+# Create roles
+iam-ra role create admin --policy arn:aws:iam::aws:policy/AdministratorAccess
+iam-ra role create deploy --policy arn:aws:iam::123:policy/DeployPolicy --session-duration 7200
+
+# Onboard hosts
+iam-ra host onboard webserver --role admin
+iam-ra host onboard ci-runner --role deploy --validity-days 90
+
+# Check status
+iam-ra status
+iam-ra status --json
+
+# Clean up
+iam-ra host offboard webserver
+iam-ra role delete deploy
+iam-ra destroy --yes
 ```
 
-Performs:
-1. Deploys `iam-ra-host-<hostname>` CloudFormation stack
-2. Retrieves certificate and private key from Secrets Manager
-3. Creates SOPS-encrypted `secrets/hosts/<hostname>/iam-ra.yaml`
+## Module Configuration
 
-## Modules
+### NixOS/Darwin (System Module)
 
-| Module | Platform | Description |
-|--------|----------|-------------|
-| `homeModules.default` | Any | Direct home-manager use, configures ~/.aws/config |
-| `nixosModules.default` | NixOS | System-level, adds `user` option, wires home-manager |
-| `darwinModules.default` | macOS | System-level, adds `user` option, wires home-manager |
+```nix
+programs.iamRolesAnywhere = {
+  enable = true;
+  user = "alice";                    # Required: user to configure
+  
+  certificate = {
+    certPath = "/path/to/cert.pem";  # Any secrets manager path
+    keyPath = "/path/to/key.pem";
+  };
+  
+  trustAnchorArn = "arn:aws:rolesanywhere:...";
+  region = "ap-southeast-2";
+  sessionDuration = 3600;            # Optional: default session duration
+  
+  profiles = {
+    myprofile = {
+      profileArn = "arn:aws:rolesanywhere:...";
+      roleArn = "arn:aws:iam::...:role/...";
+      makeDefault = false;           # Create [default] profile too?
+      awsProfileName = "myprofile";  # Override AWS profile name
+      sessionDuration = 900;         # Override per-profile
+      output = "json";               # json, yaml, text, table
+      extraConfig = {                # Additional AWS config
+        cli_pager = "";
+      };
+    };
+  };
+};
+```
 
-## Configuration Options
+### Home Manager (Direct)
 
-### Certificate Paths
+Same options, but without `user`:
 
-| Option | Description |
-|--------|-------------|
-| `certificate.certPath` | Path to X.509 certificate (any secrets manager path) |
-| `certificate.keyPath` | Path to private key (any secrets manager path) |
+```nix
+programs.iamRolesAnywhere = {
+  enable = true;
+  certificate = { ... };
+  trustAnchorArn = "...";
+  region = "...";
+  profiles = { ... };
+};
+```
 
-### AWS Configuration
+## Secrets Manager Integration
 
-| Option | Description | Required |
-|--------|-------------|----------|
-| `aws.region` | AWS region | Yes |
-| `aws.trustAnchorArn` | Trust anchor ARN | Yes |
-| `aws.profileArn` | Profile ARN | Yes |
-| `aws.roleArn` | IAM role ARN | Yes |
-| `aws.sessionDuration` | Session duration (seconds) | No (3600) |
+The module is **secrets-manager agnostic**. Just provide paths to certificate files.
 
-### AWS Profile
+### With SOPS
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `awsProfile.name` | AWS CLI profile name | `iam-ra` |
-| `awsProfile.makeDefault` | Also set as default profile | `false` |
-| `awsProfile.output` | Default output format | `json` |
-| `awsProfile.extraConfig` | Additional settings | `{}` |
+```nix
+sops.secrets."iam-ra/cert" = {
+  sopsFile = ./secrets/hosts/myhost/iam-ra.yaml;
+  key = "certificate";
+};
+sops.secrets."iam-ra/key" = {
+  sopsFile = ./secrets/hosts/myhost/iam-ra.yaml;
+  key = "private_key";
+};
 
-### System Module Only
+programs.iamRolesAnywhere.certificate = {
+  certPath = config.sops.secrets."iam-ra/cert".path;
+  keyPath = config.sops.secrets."iam-ra/key".path;
+};
+```
 
-| Option | Description |
-|--------|-------------|
-| `user` | Username to configure IAM Roles Anywhere for |
+### With agenix
+
+```nix
+age.secrets.iam-ra-cert.file = ./secrets/iam-ra-cert.age;
+age.secrets.iam-ra-key.file = ./secrets/iam-ra-key.age;
+
+programs.iamRolesAnywhere.certificate = {
+  certPath = config.age.secrets.iam-ra-cert.path;
+  keyPath = config.age.secrets.iam-ra-key.path;
+};
+```
+
+### With Static Files
+
+```nix
+programs.iamRolesAnywhere.certificate = {
+  certPath = "/etc/ssl/iam-ra/cert.pem";
+  keyPath = "/etc/ssl/iam-ra/key.pem";
+};
+```
 
 ## Architecture
 
 ```
 AWS Account
 ├── CloudFormation Stacks
-│   ├── iam-ra-rootca (CA setup)
-│   ├── iam-ra-account (Trust Anchor + Lambda)
-│   └── iam-ra-host-<hostname> (per host)
-├── Secrets Manager
-│   └── /iam-ra-hosts/<hostname>/{certificate,private-key}
-└── SSM Parameters
-    └── /iam-ra/{trust-anchor-arn,certificate-issuer-arn,...}
+│   ├── iam-ra-{namespace}-init     (S3, KMS, Lambdas)
+│   ├── iam-ra-{namespace}-rootca   (Trust Anchor)
+│   ├── iam-ra-{namespace}-role-*   (IAM Roles + Profiles)
+│   └── iam-ra-{namespace}-host-*   (Host certificates)
+├── S3 Bucket
+│   ├── {namespace}/state.json
+│   ├── {namespace}/ca/certificate.pem
+│   └── {namespace}/hosts/{hostname}/*
+├── SSM Parameters
+│   └── /iam-ra/{namespace}/state-location
+└── Secrets Manager
+    └── /iam-ra/{namespace}/hosts/{hostname}/*
 
-Git Repository
-└── secrets/hosts/<hostname>/iam-ra.yaml (SOPS-encrypted backup)
+Local
+├── ~/.local/share/iam-ra/
+│   └── {namespace}/ca-private-key.pem  (self-signed CA only)
+└── secrets/hosts/{hostname}/iam-ra.yaml (SOPS-encrypted)
 
-Nix Host
-├── /run/secrets/iam-ra/{cert,key} (deployed by secrets manager)
-└── ~/.aws/config (credential_process → aws_signing_helper)
+Host
+├── /run/secrets/iam-ra/*  (deployed by secrets manager)
+└── ~/.aws/config          (credential_process for each profile)
 ```
 
 ## Directory Structure
@@ -286,52 +338,55 @@ Nix Host
 iam-roles-anywhere/
 ├── flake.nix
 ├── README.md
-├── lib/
-│   ├── default.nix              # ARN validation, command builders
-│   └── _unused.nix              # Archived functions for future use
-├── modules/
-│   ├── default.nix              # Module exports (home, nixos, darwin)
-│   ├── options.nix              # Option definitions (API surface)
-│   ├── packages.nix             # Package installation
-│   ├── aws-profile.nix          # AWS CLI profile configuration
-│   └── validation.nix           # ARN assertions and warnings
-└── iam-ra-cli/
-    ├── pyproject.toml           # Python package definition
-    ├── iam_ra_cli/
-    │   ├── main.py              # CLI entry point
-    │   ├── commands/
-    │   │   ├── init.py          # iam-ra init
-    │   │   └── onboard.py       # iam-ra onboard
-    │   ├── lib/
-    │   │   ├── aws.py           # Secrets Manager helpers
-    │   │   ├── cfn.py           # CloudFormation helpers
-    │   │   ├── sops.py          # SOPS helpers
-    │   │   └── templates.py     # SAM runner
-    │   └── data/
-    │       └── cloudformation/  # Bundled SAM templates
-    │           ├── account-rootca-stack.yaml
-    │           ├── account-iamra-stack.yaml
-    │           ├── host-stack.yaml
-    │           ├── ca_generator/
-    │           └── certificate_issuer/
-    └── tests/
+├── VERSION
+├── nix/
+│   ├── package.nix           # CLI package (uv2nix)
+│   ├── module.nix            # Module exports
+│   ├── module-options.nix    # Option definitions
+│   ├── module-aws-profile.nix # Multi-profile AWS config
+│   ├── module-validation.nix # ARN validation
+│   ├── module-packages.nix   # Package installation
+│   ├── lib.nix               # Helper functions
+│   └── checks.nix            # Nix tests
+├── src/iam_ra_cli/
+│   ├── main.py               # CLI entry point
+│   ├── commands/             # CLI commands
+│   ├── workflows/            # Orchestration logic
+│   ├── operations/           # Atomic operations
+│   ├── lib/                  # Infrastructure helpers
+│   ├── models/               # Data models
+│   └── data/cloudformation/  # CFN templates
+├── tests/                    # Python tests
+└── cloudformation/           # Standalone CFN templates
 ```
 
 ## Troubleshooting
 
-### "No certificate found"
-- Ensure secrets are configured in host config
-- Check paths match: `certificate.certPath` ↔ your secrets manager path
+### "Namespace not initialized"
+
+```bash
+iam-ra init
+```
+
+### "Role not found"
+
+```bash
+iam-ra role list
+iam-ra role create myrole --policy arn:aws:iam::aws:policy/...
+```
 
 ### "Certificate not trusted"
-- Verify certificate signed by CA in trust anchor
-- Check validity: `openssl x509 -in cert.pem -noout -dates`
 
-### "Access denied assuming role"
-- Check IAM role trust policy conditions
-- Verify certificate CN matches hostname
+```bash
+# Check certificate validity
+openssl x509 -in /run/secrets/iam-ra/cert -noout -dates -subject
 
-### Test manually
+# Verify trust anchor matches
+aws rolesanywhere get-trust-anchor --trust-anchor-id ...
+```
+
+### Test credentials manually
+
 ```bash
 aws_signing_helper credential-process \
   --certificate /run/secrets/iam-ra/cert \
@@ -341,8 +396,6 @@ aws_signing_helper credential-process \
   --role-arn arn:aws:iam::...:role/...
 ```
 
-## References
+## License
 
-- [AWS IAM Roles Anywhere](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/introduction.html)
-- [aws_signing_helper](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/credential-helper.html)
-
+MIT
