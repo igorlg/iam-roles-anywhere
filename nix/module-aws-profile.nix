@@ -30,11 +30,14 @@ let
     };
 
   # Build AWS CLI config for a single profile
-  mkProfileConfig = name: profileCfg: {
-    credential_process = mkCredentialProcess profileCfg;
-    region = cfg.region;
-    output = profileCfg.output;
-  } // profileCfg.extraConfig;
+  mkProfileConfig =
+    name: profileCfg:
+    {
+      credential_process = mkCredentialProcess profileCfg;
+      region = cfg.region;
+      output = profileCfg.output;
+    }
+    // profileCfg.extraConfig;
 
   # Generate all named profiles
   # Each profile gets a "profile <name>" entry in AWS config
@@ -51,7 +54,9 @@ let
       let
         firstDefault = lib.head (lib.attrValues defaultProfiles);
       in
-      { default = mkProfileConfig "default" firstDefault; }
+      {
+        default = mkProfileConfig "default" firstDefault;
+      }
     else
       { };
 

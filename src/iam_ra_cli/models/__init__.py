@@ -107,6 +107,31 @@ class Host:
     private_key_secret_arn: Arn
 
 
+@dataclass(frozen=True)
+class K8sCluster:
+    """Kubernetes cluster configured for IAM Roles Anywhere.
+
+    Represents a K8s cluster where cert-manager Issuer and CA Secret
+    have been set up. Multiple workloads can reference the same cluster.
+    """
+
+    name: str
+
+
+@dataclass(frozen=True)
+class K8sWorkload:
+    """Kubernetes workload onboarded to IAM Roles Anywhere.
+
+    Represents an application/service in a K8s cluster that uses
+    IAM Roles Anywhere for AWS credentials via cert-manager certificates.
+    """
+
+    name: str
+    cluster_name: str
+    role_name: str
+    namespace: str = "default"
+
+
 @dataclass
 class State:
     """Complete IAM Roles Anywhere state for a namespace."""
@@ -118,6 +143,8 @@ class State:
     ca: CA | None = None
     roles: dict[str, Role] = field(default_factory=dict)
     hosts: dict[str, Host] = field(default_factory=dict)
+    k8s_clusters: dict[str, K8sCluster] = field(default_factory=dict)
+    k8s_workloads: dict[str, K8sWorkload] = field(default_factory=dict)
 
     @property
     def is_initialized(self) -> bool:
