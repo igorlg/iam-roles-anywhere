@@ -1,63 +1,224 @@
-# Release - Version bump and artifact generation on main
+# Release Workflow
 #
-# Triggered when PRs are merged to main.
-# Uses conventional commits to determine version bump.
-# Creates GitHub releases and publishes to FlakeHub.
+# Triggered when PRs are merged to main. Requires a version label on the PR.
 #
-# Version tracking:
-#   - VERSION file: single source of truth
-#   - iam-ra-cli/pyproject.toml: updated by release-please
-#   - Both are kept in sync automatically
+# Labels:
+#   - patch: bump 0.1.0 → 0.1.1
+#   - minor: bump 0.1.0 → 0.2.0
+#   - major: bump 0.1.0 → 1.0.0
+#   - skip-release: no version bump, no release
+#
+# Flow:
+#   1. Check PR for version label
+#   2. Calculate new version
+#   3. Update VERSION file and sync to pyproject.toml/CFN
+#   4. Commit and push
+#   5. Create GitHub release with tag
 
 name: Release
 
 on:
+  pull_request:
+    types: [opened, labeled, unlabeled, synchronize]
+    branches: [main]
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: write
   pull-requests: write
-  id-token: write  # Required for FlakeHub
 
 jobs:
-  release-please:
-    name: Release Please
+  # Check that PR has a version label (runs on PR events)
+  check-label:
+    name: Check Version Label
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for version label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            const versionLabels = ['patch', 'minor', 'major', 'skip-release'];
+            const found = labels.filter(l => versionLabels.includes(l));
+            
+            if (found.length === 0) {
+              core.setFailed(
+                'PR must have a version label: patch, minor, major, or skip-release\n\n' +
+                'Add one of these labels to indicate the release type.'
+              );
+            } else if (found.length > 1) {
+              core.setFailed(
+                `PR has multiple version labels: ${found.join(', ')}\n\n` +
+                'Please use only one version label.'
+              );
+            } else {
+              core.info(`Version label: ${found[0]}`);
+            }
+
+  # Create release when PR is merged (runs on push to main)
+  release:
+    name: Create Release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      released: ${{ steps.release.outputs.released }}
       version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Release Please
+      - name: Get merged PR info
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Find the PR that was just merged
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'closed',
+              sort: 'updated',
+              direction: 'desc',
+              per_page: 5
+            });
+            
+            const mergedPr = prs.find(pr => 
+              pr.merge_commit_sha === context.sha && pr.merged_at
+            );
+            
+            if (!mergedPr) {
+              core.info('No merged PR found for this commit - likely a direct push');
+              core.setOutput('skip', 'true');
+              return;
+            }
+            
+            const labels = mergedPr.labels.map(l => l.name);
+            const versionLabels = ['patch', 'minor', 'major', 'skip-release'];
+            const versionLabel = labels.find(l => versionLabels.includes(l));
+            
+            if (!versionLabel) {
+              core.setFailed('Merged PR has no version label');
+              return;
+            }
+            
+            core.setOutput('skip', versionLabel === 'skip-release' ? 'true' : 'false');
+            core.setOutput('bump', versionLabel);
+            core.setOutput('pr_number', mergedPr.number);
+            core.setOutput('pr_title', mergedPr.title);
+            core.setOutput('pr_body', mergedPr.body || '');
+
+      - name: Skip if no release needed
+        if: steps.pr.outputs.skip == 'true'
+        run: echo "Skipping release (skip-release label or direct push)"
+
+      - name: Setup Python
+        if: steps.pr.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Calculate new version
+        if: steps.pr.outputs.skip != 'true'
+        id: version
+        run: |
+          current=$(cat VERSION)
+          echo "Current version: $current"
+          
+          IFS='.' read -r major minor patch <<< "$current"
+          
+          case "${{ steps.pr.outputs.bump }}" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+          esac
+          
+          new_version="${major}.${minor}.${patch}"
+          echo "New version: $new_version"
+          echo "version=$new_version" >> $GITHUB_OUTPUT
+
+      - name: Update VERSION and sync
+        if: steps.pr.outputs.skip != 'true'
+        run: |
+          echo "${{ steps.version.outputs.version }}" > VERSION
+          python scripts/sync-version.py
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION pyproject.toml src/iam_ra_cli/__init__.py src/iam_ra_cli/data/cloudformation/*.yaml
+          git commit -m "chore: bump version to ${{ steps.version.outputs.version }}"
+          git push
+
+      - name: Create GitHub Release
+        if: steps.pr.outputs.skip != 'true'
         id: release
-        uses: googleapis/release-please-action@v4
+        uses: actions/github-script@v7
         with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+          script: |
+            const version = '${{ steps.version.outputs.version }}';
+            const tag = `v${version}`;
+            const prNumber = '${{ steps.pr.outputs.pr_number }}';
+            const prTitle = '${{ steps.pr.outputs.pr_title }}';
+            
+            // Create tag
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/${tag}`,
+              sha: context.sha
+            });
+            
+            // Create release
+            const { data: release } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `v${version}`,
+              body: `## What's Changed\n\n` +
+                    `* ${prTitle} (#${prNumber})\n\n` +
+                    `## Installation\n\n` +
+                    `**Via Nix:**\n` +
+                    `\`\`\`bash\n` +
+                    `nix run github:${context.repo.owner}/${context.repo.repo}#iam-ra-cli -- --help\n` +
+                    `\`\`\`\n\n` +
+                    `**As flake input:**\n` +
+                    `\`\`\`nix\n` +
+                    `inputs.iam-roles-anywhere.url = "github:${context.repo.owner}/${context.repo.repo}/${tag}";\n` +
+                    `\`\`\``,
+              draft: false,
+              prerelease: false
+            });
+            
+            core.setOutput('released', 'true');
+            core.setOutput('version', version);
+            core.setOutput('tag', tag);
+            core.info(`Created release: ${release.html_url}`);
 
-  # Build and verify on Linux (both architectures)
-  build-linux:
-    name: Build Linux (${{ matrix.arch }})
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
+  # Build verification after release
+  verify-build:
+    name: Verify Build
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.release.outputs.tag }}
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
@@ -65,85 +226,7 @@ jobs:
       - name: Build CLI
         run: nix build .#iam-ra-cli --print-build-logs
 
-      - name: Verify CLI runs
+      - name: Verify CLI
         run: |
           ./result/bin/iam-ra --version
           ./result/bin/iam-ra --help
-
-      # Note: The Nix-built CLI is NOT a standalone binary.
-      # It's a wrapper script that requires Nix store paths.
-      # Users should install via: nix run github:owner/iam-roles-anywhere#iam-ra-cli
-      # or add to their flake inputs.
-      #
-      # For standalone binaries, we would need PyInstaller/Nuitka,
-      # which is out of scope for now.
-
-  # Placeholder for Darwin builds (requires self-hosted runners or macOS runners)
-  build-darwin:
-    name: Build Darwin (${{ matrix.arch }})
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ubuntu-latest  # Placeholder - would need macos-latest or self-hosted
-    strategy:
-      matrix:
-        arch: [x86_64, aarch64]
-    steps:
-      - name: Darwin build placeholder
-        run: |
-          echo "Darwin builds require macOS runners or cross-compilation."
-          echo "For now, Darwin users should install via Nix:"
-          echo "  nix run github:owner/iam-roles-anywhere#iam-ra-cli"
-          echo ""
-          echo "To enable Darwin builds:"
-          echo "  1. Use macos-latest runners (x86_64 only)"
-          echo "  2. Use self-hosted aarch64-darwin runners"
-          echo "  3. Or implement cross-compilation"
-
-  # Publish to FlakeHub
-  flakehub:
-    name: Publish to FlakeHub
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Publish to FlakeHub
-        uses: DeterminateSystems/flakehub-push@main
-        with:
-          visibility: public
-          tag: ${{ needs.release-please.outputs.tag_name }}
-
-  # Create release summary
-  release-summary:
-    name: Release Summary
-    needs: [release-please, build-linux, flakehub]
-    if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Summary
-        run: |
-          echo "## Release ${{ needs.release-please.outputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Installation" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Via Nix (recommended):**" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "nix run github:${{ github.repository }}#iam-ra-cli -- --help" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Via FlakeHub:**" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "nix run flakehub:${{ github.repository }}#iam-ra-cli -- --help" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**As flake input:**" >> $GITHUB_STEP_SUMMARY
-          echo '```nix' >> $GITHUB_STEP_SUMMARY
-          echo 'inputs.iam-roles-anywhere.url = "github:${{ github.repository }}/${{ needs.release-please.outputs.tag_name }}";' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
