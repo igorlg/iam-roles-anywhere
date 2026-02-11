@@ -21,7 +21,7 @@ Parameters:
 Outputs:
   Version:
     Description: Template version
-    Value: "1.0.0"
+    Value: "1.0.1"
 
   CertificateSecretArn:
     Description: Secrets Manager ARN for certificate
