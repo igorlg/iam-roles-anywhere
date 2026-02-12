@@ -1,5 +1,8 @@
 """Tests for K8s manifest generation and workflows."""
 
+import tempfile
+from pathlib import Path
+
 import pytest
 from moto import mock_aws
 
@@ -57,11 +60,21 @@ IPq3pPTbbMOQ2NwlKgrosN9MzKZM5BPOUw==
 
 
 @pytest.fixture
-def aws_context():
-    """Create an AwsContext for testing."""
-    with mock_aws():
-        ctx = AwsContext(region="us-east-1")
-        yield ctx
+def aws_context(monkeypatch):
+    """Create an AwsContext for testing with isolated XDG data dir."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = Path(tmpdir) / "data"
+        data_dir.mkdir()
+        monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
+
+        # Create CA private key in the expected location
+        ca_key_dir = data_dir / "iam-ra" / "default"
+        ca_key_dir.mkdir(parents=True)
+        (ca_key_dir / "ca-private-key.pem").write_text(SAMPLE_CA_KEY)
+
+        with mock_aws():
+            ctx = AwsContext(region="us-east-1")
+            yield ctx
 
 
 @pytest.fixture
