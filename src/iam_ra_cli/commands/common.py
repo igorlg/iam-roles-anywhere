@@ -14,6 +14,7 @@ import click
 
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    CAKeyNotFoundError,
     HostAlreadyExistsError,
     HostNotFoundError,
     K8sClusterAlreadyExistsError,
@@ -116,7 +117,7 @@ def handle_result(result: Result[T, Any], success_message: str | None = None) ->
     match result:
         case Ok(value):
             if success_message:
-                click.secho(success_message, fg="green", bold=True)
+                click.secho(success_message, fg="green", bold=True, err=True)
             return value
         case Err(error):
             handle_error(error)
@@ -173,6 +174,9 @@ def _format_error(error: Any) -> str:
         case K8sUnsupportedCAModeError(ca_mode):
             return f"CA mode '{ca_mode}' is not supported for K8s. Only 'self-signed' is supported."
 
+        case CAKeyNotFoundError(expected_path):
+            return f"CA private key not found at '{expected_path}'. Was 'iam-ra init' run on this machine?"
+
         case StackDeployError(stack_name, status, reason):
             return f"Failed to deploy stack '{stack_name}': {status} - {reason}"
 
@@ -220,10 +224,10 @@ def _to_serializable(obj: Any) -> Any:
     return str(obj)
 
 
-def echo_key_value(key: str, value: Any, indent: int = 0) -> None:
+def echo_key_value(key: str, value: Any, indent: int = 0, err: bool = False) -> None:
     """Print a key-value pair with optional indentation."""
     prefix = "  " * indent
-    click.echo(f"{prefix}{key}: {value}")
+    click.echo(f"{prefix}{key}: {value}", err=err)
 
 
 def echo_section(title: str) -> None:
