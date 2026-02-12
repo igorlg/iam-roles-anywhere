@@ -10,7 +10,7 @@ Parameters:
 Outputs:
   Version:
     Description: Template version
-    Value: "1.0.2"
+    Value: "1.0.3"
 
   BucketArn:
     Description: S3 bucket ARN for state and certificate storage
