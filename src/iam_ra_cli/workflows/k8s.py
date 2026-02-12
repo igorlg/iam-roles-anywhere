@@ -10,7 +10,6 @@ from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     CAKeyNotFoundError,
-    K8sClusterAlreadyExistsError,
     K8sClusterInUseError,
     K8sClusterNotFoundError,
     K8sUnsupportedCAModeError,
