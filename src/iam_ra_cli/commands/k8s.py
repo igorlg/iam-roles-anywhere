@@ -78,10 +78,8 @@ def k8s_setup(
         success_message=f"Cluster '{cluster_name}' set up successfully!",
     )
 
-    click.echo()
-    click.echo("# Apply these manifests to your cluster:")
-    click.echo("# kubectl apply -f <this-output>")
-    click.echo()
+    click.echo("# Apply these manifests to your cluster:", err=True)
+    click.echo("# kubectl apply -f <this-output>", err=True)
     click.echo(result.manifests.to_yaml())
 
 
@@ -213,14 +211,11 @@ def k8s_onboard(
         success_message=f"Workload '{workload_name}' onboarded successfully!",
     )
 
-    click.echo()
-    echo_key_value("Cluster", result.workload.cluster_name)
-    echo_key_value("Role", result.workload.role_name)
-    echo_key_value("K8s Namespace", result.workload.namespace)
-    click.echo()
-    click.echo("# Apply these manifests to your cluster:")
-    click.echo("# kubectl apply -f <this-output>")
-    click.echo()
+    echo_key_value("Cluster", result.workload.cluster_name, err=True)
+    echo_key_value("Role", result.workload.role_name, err=True)
+    echo_key_value("K8s Namespace", result.workload.namespace, err=True)
+    click.echo("# Apply these manifests to your cluster:", err=True)
+    click.echo("# kubectl apply -f <this-output>", err=True)
     click.echo(result.manifests.to_yaml())
 
 

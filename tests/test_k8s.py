@@ -49,6 +49,12 @@ JH8fMB8GA1UdIwQYMBaAFJDVlR0CzoSIQx6hM5HABKpvJH8fMA8GA1UdEwEB/wQF
 MAMBAf8wDQYJKoZIhvcNAQELBQADQQBxaVBm6CdpH5nH7n3t+nLwPfD0BxA=
 -----END CERTIFICATE-----"""
 
+SAMPLE_CA_KEY = """-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIJqdbllFipqJsrzu5ua19pGq7l2/YRP3GRI+ksp3xR3RoAoGCCqGSM49
+AwEHoUQDQgAEZ430G7tL4/GTs3JKsmcxvvZkXoq1rZ40VP9zgeOSYOlVQZnNZLdl
+IPq3pPTbbMOQ2NwlKgrosN9MzKZM5BPOUw==
+-----END EC PRIVATE KEY-----"""
+
 
 @pytest.fixture
 def aws_context():
@@ -138,33 +144,40 @@ class TestGenerateCaSecret:
 
     def test_generates_valid_yaml(self):
         """Should generate valid K8s Secret YAML."""
-        result = generate_ca_secret(SAMPLE_CA_CERT)
+        result = generate_ca_secret(SAMPLE_CA_CERT, SAMPLE_CA_KEY)
 
         assert "apiVersion: v1" in result
         assert "kind: Secret" in result
         assert "type: kubernetes.io/tls" in result
         assert "tls.crt:" in result
+        assert "tls.key:" in result
 
     def test_uses_default_name(self):
         """Should use default name if not specified."""
-        result = generate_ca_secret(SAMPLE_CA_CERT)
+        result = generate_ca_secret(SAMPLE_CA_CERT, SAMPLE_CA_KEY)
         assert f"name: {DEFAULT_CA_SECRET_NAME}" in result
 
     def test_uses_custom_name(self):
         """Should use custom name if specified."""
-        result = generate_ca_secret(SAMPLE_CA_CERT, name="my-ca")
+        result = generate_ca_secret(SAMPLE_CA_CERT, SAMPLE_CA_KEY, name="my-ca")
         assert "name: my-ca" in result
 
     def test_uses_custom_namespace(self):
         """Should use custom namespace if specified."""
-        result = generate_ca_secret(SAMPLE_CA_CERT, namespace="prod")
+        result = generate_ca_secret(SAMPLE_CA_CERT, SAMPLE_CA_KEY, namespace="prod")
         assert "namespace: prod" in result
 
     def test_includes_certificate(self):
         """Should include the CA certificate."""
-        result = generate_ca_secret(SAMPLE_CA_CERT)
+        result = generate_ca_secret(SAMPLE_CA_CERT, SAMPLE_CA_KEY)
         assert "BEGIN CERTIFICATE" in result
         assert "END CERTIFICATE" in result
+
+    def test_includes_private_key(self):
+        """Should include the CA private key."""
+        result = generate_ca_secret(SAMPLE_CA_CERT, SAMPLE_CA_KEY)
+        assert "BEGIN EC PRIVATE KEY" in result
+        assert "END EC PRIVATE KEY" in result
 
 
 class TestGenerateIssuer:
@@ -297,14 +310,14 @@ class TestGenerateClusterManifests:
 
     def test_returns_cluster_manifests(self):
         """Should return ClusterManifests object."""
-        result = generate_cluster_manifests(SAMPLE_CA_CERT)
+        result = generate_cluster_manifests(SAMPLE_CA_CERT, SAMPLE_CA_KEY)
 
         assert result.ca_secret is not None
         assert result.issuer is not None
 
     def test_to_yaml_combines_manifests(self):
         """Should combine manifests with separator."""
-        result = generate_cluster_manifests(SAMPLE_CA_CERT)
+        result = generate_cluster_manifests(SAMPLE_CA_CERT, SAMPLE_CA_KEY)
         yaml = result.to_yaml()
 
         assert "---" in yaml
@@ -367,14 +380,22 @@ class TestSetup:
 
         assert isinstance(result, Err)
 
-    def test_setup_fails_if_cluster_exists(self, aws_context, initialized_state):
-        """Should fail if cluster already exists."""
+    def test_setup_is_idempotent(self, aws_context, initialized_state):
+        """Should succeed if cluster already exists (idempotent)."""
         # First setup
-        setup(aws_context, "default", "prod")
+        result1 = setup(aws_context, "default", "prod")
+        assert isinstance(result1, Ok)
 
-        # Second setup should fail
-        result = setup(aws_context, "default", "prod")
-        assert isinstance(result, Err)
+        # Second setup should also succeed
+        result2 = setup(aws_context, "default", "prod")
+        assert isinstance(result2, Ok)
+        assert result2.value.cluster.name == "prod"
+        assert result2.value.manifests.ca_secret is not None
+
+        # Should still be only one cluster in state
+        list_result = list_k8s(aws_context, "default")
+        assert isinstance(list_result, Ok)
+        assert len(list_result.value.clusters) == 1
 
     def test_setup_saves_cluster_to_state(self, aws_context, initialized_state):
         """Should save cluster to state."""
@@ -436,13 +457,21 @@ class TestOnboard:
         result = onboard(aws_context, "default", "my-app", "prod", "nonexistent")
         assert isinstance(result, Err)
 
-    def test_onboard_fails_if_workload_exists(self, aws_context, initialized_state):
-        """Should fail if workload already exists."""
+    def test_onboard_is_idempotent(self, aws_context, initialized_state):
+        """Should succeed if workload already exists (idempotent)."""
         setup(aws_context, "default", "prod")
-        onboard(aws_context, "default", "my-app", "prod", "admin")
+        result1 = onboard(aws_context, "default", "my-app", "prod", "admin")
+        assert isinstance(result1, Ok)
 
-        result = onboard(aws_context, "default", "my-app", "prod", "admin")
-        assert isinstance(result, Err)
+        result2 = onboard(aws_context, "default", "my-app", "prod", "admin")
+        assert isinstance(result2, Ok)
+        assert result2.value.workload.name == "my-app"
+        assert result2.value.manifests.configmap is not None
+
+        # Should still be only one workload in state
+        list_result = list_k8s(aws_context, "default")
+        assert isinstance(list_result, Ok)
+        assert len(list_result.value.workloads) == 1
 
     def test_onboard_manifests_include_correct_arns(self, aws_context, initialized_state):
         """Should include correct ARNs in manifests."""

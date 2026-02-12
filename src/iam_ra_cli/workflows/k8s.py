@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    CAKeyNotFoundError,
     K8sClusterAlreadyExistsError,
     K8sClusterInUseError,
     K8sClusterNotFoundError,
     K8sUnsupportedCAModeError,
-    K8sWorkloadAlreadyExistsError,
     K8sWorkloadNotFoundError,
     NotInitializedError,
     RoleNotFoundError,
@@ -27,6 +27,7 @@ from iam_ra_cli.lib.k8s import (
     generate_cluster_manifests,
     generate_workload_manifests,
 )
+from iam_ra_cli.lib.paths import data_dir
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.lib.storage.s3 import read_object
 from iam_ra_cli.models import CAMode, K8sCluster, K8sWorkload
@@ -37,8 +38,8 @@ from iam_ra_cli.models import CAMode, K8sCluster, K8sWorkload
 
 type SetupError = (
     NotInitializedError
-    | K8sClusterAlreadyExistsError
     | K8sUnsupportedCAModeError
+    | CAKeyNotFoundError
     | S3ReadError
     | StateLoadError
     | StateSaveError
@@ -56,7 +57,6 @@ type OnboardError = (
     NotInitializedError
     | K8sClusterNotFoundError
     | RoleNotFoundError
-    | K8sWorkloadAlreadyExistsError
     | StateLoadError
     | StateSaveError
 )
@@ -118,6 +118,9 @@ def setup(
     Creates cluster-level manifests (CA Secret + Issuer) for cert-manager.
     Only supported for self-signed CA mode.
 
+    Idempotent: if the cluster already exists, regenerates and returns
+    the manifests without modifying state.
+
     Args:
         ctx: AWS context
         namespace: IAM-RA namespace
@@ -142,10 +145,6 @@ def setup(
     assert state.init is not None
     assert state.ca is not None
 
-    # Check cluster doesn't already exist
-    if cluster_name in state.k8s_clusters:
-        return Err(K8sClusterAlreadyExistsError(cluster_name))
-
     # Only self-signed CA is supported for K8s
     if state.ca.mode != CAMode.SELF_SIGNED:
         return Err(K8sUnsupportedCAModeError(state.ca.mode.value))
@@ -160,22 +159,30 @@ def setup(
         case Ok(ca_cert_pem):
             pass
 
+    # Load CA private key from local storage
+    ca_key_path = data_dir() / namespace / "ca-private-key.pem"
+    if not ca_key_path.exists():
+        return Err(CAKeyNotFoundError(ca_key_path))
+    ca_key_pem = ca_key_path.read_text()
+
     # Generate manifests
     manifests = generate_cluster_manifests(
         ca_cert_pem=ca_cert_pem,
+        ca_key_pem=ca_key_pem,
         namespace=k8s_namespace,
     )
 
-    # Create cluster record
-    cluster = K8sCluster(name=cluster_name)
+    # Create or retrieve cluster record (idempotent)
+    already_exists = cluster_name in state.k8s_clusters
+    cluster = state.k8s_clusters.get(cluster_name, K8sCluster(name=cluster_name))
 
-    # Update state
-    state.k8s_clusters[cluster_name] = cluster
-    match state_module.save(ctx.ssm, ctx.s3, state):
-        case Err() as e:
-            return e
-        case Ok(_):
-            pass
+    if not already_exists:
+        state.k8s_clusters[cluster_name] = cluster
+        match state_module.save(ctx.ssm, ctx.s3, state):
+            case Err() as e:
+                return e
+            case Ok(_):
+                pass
 
     return Ok(SetupResult(cluster=cluster, manifests=manifests))
 
@@ -245,6 +252,9 @@ def onboard(
 
     Generates workload-level manifests (Certificate + ConfigMap + sample Pod).
 
+    Idempotent: if the workload already exists, regenerates and returns
+    the manifests without modifying state.
+
     Args:
         ctx: AWS context
         namespace: IAM-RA namespace
@@ -279,10 +289,6 @@ def onboard(
     if role_name not in state.roles:
         return Err(RoleNotFoundError(namespace, role_name))
 
-    # Check workload doesn't already exist
-    if workload_name in state.k8s_workloads:
-        return Err(K8sWorkloadAlreadyExistsError(workload_name))
-
     role = state.roles[role_name]
 
     # Generate manifests
@@ -295,21 +301,25 @@ def onboard(
         duration_hours=duration_hours,
     )
 
-    # Create workload record
-    workload = K8sWorkload(
-        name=workload_name,
-        cluster_name=cluster_name,
-        role_name=role_name,
-        namespace=k8s_namespace,
+    # Create or retrieve workload record (idempotent)
+    already_exists = workload_name in state.k8s_workloads
+    workload = state.k8s_workloads.get(
+        workload_name,
+        K8sWorkload(
+            name=workload_name,
+            cluster_name=cluster_name,
+            role_name=role_name,
+            namespace=k8s_namespace,
+        ),
     )
 
-    # Update state
-    state.k8s_workloads[workload_name] = workload
-    match state_module.save(ctx.ssm, ctx.s3, state):
-        case Err() as e:
-            return e
-        case Ok(_):
-            pass
+    if not already_exists:
+        state.k8s_workloads[workload_name] = workload
+        match state_module.save(ctx.ssm, ctx.s3, state):
+            case Err() as e:
+                return e
+            case Ok(_):
+                pass
 
     return Ok(OnboardResult(workload=workload, manifests=manifests))
 

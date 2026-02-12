@@ -45,6 +45,7 @@ class WorkloadManifests:
 
 def generate_ca_secret(
     ca_cert_pem: str,
+    ca_key_pem: str,
     name: str = DEFAULT_CA_SECRET_NAME,
     namespace: str = "default",
 ) -> str:
@@ -55,14 +56,16 @@ def generate_ca_secret(
 
     Args:
         ca_cert_pem: CA certificate in PEM format
+        ca_key_pem: CA private key in PEM format
         name: Secret name
         namespace: K8s namespace
 
     Returns:
         YAML manifest for the Secret
     """
-    # Indent the cert for YAML
+    # Indent the cert and key for YAML
     indented_cert = "\n".join(f"    {line}" for line in ca_cert_pem.strip().split("\n"))
+    indented_key = "\n".join(f"    {line}" for line in ca_key_pem.strip().split("\n"))
 
     return f"""apiVersion: v1
 kind: Secret
@@ -73,7 +76,8 @@ type: kubernetes.io/tls
 stringData:
   tls.crt: |
 {indented_cert}
-  tls.key: ""
+  tls.key: |
+{indented_key}
 """
 
 
@@ -314,6 +318,7 @@ spec:
 
 def generate_cluster_manifests(
     ca_cert_pem: str,
+    ca_key_pem: str,
     namespace: str = "default",
     ca_secret_name: str = DEFAULT_CA_SECRET_NAME,
     issuer_name: str = DEFAULT_ISSUER_NAME,
@@ -322,6 +327,7 @@ def generate_cluster_manifests(
 
     Args:
         ca_cert_pem: CA certificate in PEM format
+        ca_key_pem: CA private key in PEM format
         namespace: K8s namespace for the CA secret and issuer
         ca_secret_name: Name for the CA secret
         issuer_name: Name for the Issuer
@@ -330,7 +336,7 @@ def generate_cluster_manifests(
         ClusterManifests with ca_secret and issuer YAML
     """
     return ClusterManifests(
-        ca_secret=generate_ca_secret(ca_cert_pem, ca_secret_name, namespace),
+        ca_secret=generate_ca_secret(ca_cert_pem, ca_key_pem, ca_secret_name, namespace),
         issuer=generate_issuer(issuer_name, namespace, ca_secret_name),
     )
 
