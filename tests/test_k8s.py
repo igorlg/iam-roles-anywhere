@@ -369,6 +369,34 @@ class TestGenerateWorkloadManifests:
         assert "kind: ConfigMap" in yaml
         assert "kind: Pod" in yaml
 
+    def test_no_sample_pod(self):
+        """Should omit sample Pod when include_sample_pod=False."""
+        result = generate_workload_manifests(
+            "my-app",
+            "ta-arn",
+            "profile-arn",
+            "role-arn",
+            include_sample_pod=False,
+        )
+
+        assert result.pod is None
+
+    def test_no_sample_pod_to_yaml(self):
+        """Should combine only certificate and configmap when pod is omitted."""
+        result = generate_workload_manifests(
+            "my-app",
+            "ta-arn",
+            "profile-arn",
+            "role-arn",
+            include_sample_pod=False,
+        )
+        yaml = result.to_yaml()
+
+        assert yaml.count("---") == 1
+        assert "kind: Certificate" in yaml
+        assert "kind: ConfigMap" in yaml
+        assert "kind: Pod" not in yaml
+
 
 # =============================================================================
 # Workflow Tests

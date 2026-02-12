@@ -246,10 +246,11 @@ def onboard(
     role_name: str,
     k8s_namespace: str = "default",
     duration_hours: int = 24,
+    include_sample_pod: bool = True,
 ) -> Result[OnboardResult, OnboardError]:
     """Onboard a K8s workload to IAM Roles Anywhere.
 
-    Generates workload-level manifests (Certificate + ConfigMap + sample Pod).
+    Generates workload-level manifests (Certificate + ConfigMap + optional sample Pod).
 
     Idempotent: if the workload already exists, regenerates and returns
     the manifests without modifying state.
@@ -262,6 +263,7 @@ def onboard(
         role_name: IAM-RA role for the workload to assume
         k8s_namespace: K8s namespace for the workload
         duration_hours: Certificate validity in hours
+        include_sample_pod: Whether to include the sample Pod manifest
 
     Returns:
         OnboardResult with workload info and manifests
@@ -298,6 +300,7 @@ def onboard(
         role_arn=str(role.role_arn),
         namespace=k8s_namespace,
         duration_hours=duration_hours,
+        include_sample_pod=include_sample_pod,
     )
 
     # Create or retrieve workload record (idempotent)

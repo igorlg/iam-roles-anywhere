@@ -15,7 +15,6 @@ from moto import mock_aws
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     NotInitializedError,
-    RoleAlreadyExistsError,
     RoleInUseError,
     RoleNotFoundError,
 )
@@ -125,18 +124,66 @@ class TestCreateRole:
             assert isinstance(result.error, NotInitializedError)
             assert result.error.namespace == "test"
 
-    def test_create_role_fails_when_role_exists(
+    def test_create_role_is_idempotent_when_role_exists(
         self, aws_credentials, temp_xdg_dirs, state_with_role: State
     ) -> None:
+        """Re-creating an existing role should update the CFN stack and succeed."""
         with mock_aws():
             ctx = AwsContext(region="ap-southeast-2")
             setup_state_in_aws(ctx, state_with_role)
 
-            result = create_role(ctx, "test", "admin")
+            mock_role_result = RoleResult(
+                stack_name="iam-ra-test-role-admin",
+                role_arn=Arn("arn:aws:iam::123456789012:role/iam-ra-test-admin"),
+                profile_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/p-admin"
+                ),
+                policies=(Arn("arn:aws:iam::aws:policy/AdministratorAccess"),),
+            )
 
-            assert isinstance(result, Err)
-            assert isinstance(result.error, RoleAlreadyExistsError)
-            assert result.error.role_name == "admin"
+            with patch(
+                "iam_ra_cli.workflows.role.create_role_op", return_value=Ok(mock_role_result)
+            ):
+                result = create_role(
+                    ctx,
+                    "test",
+                    "admin",
+                    policies=["arn:aws:iam::aws:policy/AdministratorAccess"],
+                )
+
+            assert isinstance(result, Ok)
+            assert result.value.role_arn == Arn("arn:aws:iam::123456789012:role/iam-ra-test-admin")
+
+    def test_create_role_updates_policies_when_role_exists(
+        self, aws_credentials, temp_xdg_dirs, state_with_role: State
+    ) -> None:
+        """Re-creating an existing role with different policies should update state."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_state_in_aws(ctx, state_with_role)
+
+            new_policy = "arn:aws:iam::123456789012:policy/new-policy"
+            mock_role_result = RoleResult(
+                stack_name="iam-ra-test-role-admin",
+                role_arn=Arn("arn:aws:iam::123456789012:role/iam-ra-test-admin"),
+                profile_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/p-admin"
+                ),
+                policies=(Arn(new_policy),),
+            )
+
+            with patch(
+                "iam_ra_cli.workflows.role.create_role_op", return_value=Ok(mock_role_result)
+            ):
+                result = create_role(
+                    ctx,
+                    "test",
+                    "admin",
+                    policies=[new_policy],
+                )
+
+            assert isinstance(result, Ok)
+            assert result.value.policies == (Arn(new_policy),)
 
     def test_create_role_succeeds(
         self, aws_credentials, temp_xdg_dirs, initialized_state: State

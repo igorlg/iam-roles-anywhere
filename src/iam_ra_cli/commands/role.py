@@ -64,7 +64,7 @@ def role_create(
 
     new_role = handle_result(
         create_role(ctx, namespace, name, list(policies) if policies else None, session_duration),
-        success_message=f"Role '{name}' created successfully!",
+        success_message=f"Role '{name}' ready!",
     )
 
     click.echo()
