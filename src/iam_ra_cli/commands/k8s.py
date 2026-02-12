@@ -166,6 +166,12 @@ def k8s_teardown(
     show_default=True,
     help="Certificate validity in hours",
 )
+@click.option(
+    "--no-sample-pod",
+    is_flag=True,
+    default=False,
+    help="Omit the sample Pod manifest from the output",
+)
 def k8s_onboard(
     workload_name: str,
     role_name: str,
@@ -175,10 +181,11 @@ def k8s_onboard(
     profile: str | None,
     k8s_namespace: str,
     duration_hours: int,
+    no_sample_pod: bool,
 ) -> None:
     """Onboard a Kubernetes workload to IAM Roles Anywhere.
 
-    Generates workload-level manifests: Certificate, ConfigMap, and sample Pod.
+    Generates workload-level manifests: Certificate, ConfigMap, and optionally a sample Pod.
 
     WORKLOAD_NAME is a logical identifier for this workload (e.g., "payment-service").
 
@@ -191,6 +198,7 @@ def k8s_onboard(
     Examples:
       iam-ra k8s onboard payment-service --role admin --cluster prod
       iam-ra k8s onboard api-gateway --role readonly --cluster staging -k gateway
+      iam-ra k8s onboard my-app --role admin --cluster prod --no-sample-pod
 
     \b
     After running, apply the manifests:
@@ -207,6 +215,7 @@ def k8s_onboard(
             role_name,
             k8s_namespace,
             duration_hours,
+            include_sample_pod=not no_sample_pod,
         ),
         success_message=f"Workload '{workload_name}' onboarded successfully!",
     )

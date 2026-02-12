@@ -32,15 +32,18 @@ class ClusterManifests:
 
 @dataclass(frozen=True)
 class WorkloadManifests:
-    """Workload-level K8s manifests (Certificate + ConfigMap + sample Pod)."""
+    """Workload-level K8s manifests (Certificate + ConfigMap + optional sample Pod)."""
 
     certificate: str
     configmap: str
-    pod: str
+    pod: str | None = None
 
     def to_yaml(self) -> str:
         """Return combined YAML with document separator."""
-        return f"{self.certificate}---\n{self.configmap}---\n{self.pod}"
+        parts = [self.certificate, self.configmap]
+        if self.pod is not None:
+            parts.append(self.pod)
+        return "---\n".join(parts)
 
 
 def generate_ca_secret(
@@ -349,6 +352,7 @@ def generate_workload_manifests(
     namespace: str = "default",
     issuer_name: str = DEFAULT_ISSUER_NAME,
     duration_hours: int = DEFAULT_CERT_DURATION_HOURS,
+    include_sample_pod: bool = True,
 ) -> WorkloadManifests:
     """Generate all workload-level manifests.
 
@@ -360,11 +364,20 @@ def generate_workload_manifests(
         namespace: K8s namespace
         issuer_name: Name of the Issuer to reference
         duration_hours: Certificate validity in hours
+        include_sample_pod: Whether to include the sample Pod manifest
 
     Returns:
-        WorkloadManifests with certificate, configmap, and pod YAML
+        WorkloadManifests with certificate, configmap, and optionally pod YAML
     """
     cert_secret_name = f"{workload_name}-cert"
+
+    pod = None
+    if include_sample_pod:
+        pod = generate_sample_pod(
+            workload_name=workload_name,
+            namespace=namespace,
+            cert_secret_name=cert_secret_name,
+        )
 
     return WorkloadManifests(
         certificate=generate_certificate(
@@ -381,9 +394,5 @@ def generate_workload_manifests(
             role_arn=role_arn,
             namespace=namespace,
         ),
-        pod=generate_sample_pod(
-            workload_name=workload_name,
-            namespace=namespace,
-            cert_secret_name=cert_secret_name,
-        ),
+        pod=pod,
     )

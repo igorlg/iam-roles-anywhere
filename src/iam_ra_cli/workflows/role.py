@@ -4,7 +4,6 @@ from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     NotInitializedError,
-    RoleAlreadyExistsError,
     RoleInUseError,
     RoleNotFoundError,
     StackDeleteError,
@@ -17,13 +16,7 @@ from iam_ra_cli.models import Role
 from iam_ra_cli.operations.role import create_role as create_role_op
 from iam_ra_cli.operations.role import delete_role as delete_role_op
 
-type CreateRoleError = (
-    NotInitializedError
-    | RoleAlreadyExistsError
-    | StackDeployError
-    | StateSaveError
-    | StateLoadError
-)
+type CreateRoleError = NotInitializedError | StackDeployError | StateSaveError | StateLoadError
 type DeleteRoleError = (
     NotInitializedError
     | RoleNotFoundError
@@ -42,12 +35,15 @@ def create_role(
     policies: list[str] | None = None,
     session_duration: int = 3600,
 ) -> Result[Role, CreateRoleError]:
-    """Create an IAM role with Roles Anywhere profile.
+    """Create or update an IAM role with Roles Anywhere profile.
+
+    Idempotent: if the role already exists, re-deploys the CFN stack
+    to ensure the current policies are attached. CloudFormation handles
+    the diff -- same config is a no-op, different policies triggers an update.
 
     1. Load state, validate initialized
-    2. Check role doesn't already exist
-    3. Deploy role stack
-    4. Update state
+    2. Deploy role stack (create or update)
+    3. Update state
     """
     # Load state
     match state_module.load(ctx.ssm, ctx.s3, namespace):
@@ -61,11 +57,7 @@ def create_role(
     if not state.is_initialized:
         return Err(NotInitializedError(namespace))
 
-    # Check role doesn't exist
-    if name in state.roles:
-        return Err(RoleAlreadyExistsError(namespace, name))
-
-    # Deploy role stack
+    # Deploy role stack (CFN handles create vs update)
     match create_role_op(ctx, namespace, name, policies, session_duration):
         case Err() as e:
             return e
@@ -80,7 +72,7 @@ def create_role(
         policies=role_result.policies,
     )
 
-    # Update state
+    # Update state (always -- policies may have changed)
     state.roles[name] = new_role
     match state_module.save(ctx.ssm, ctx.s3, state):
         case Err() as e:
