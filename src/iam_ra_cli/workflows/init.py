@@ -60,30 +60,36 @@ def init(ctx: AwsContext, config: InitConfig) -> Result[State, InitError]:
         ),
     )
 
-    # Step 2: Deploy CA stack based on mode
+    # Step 2: Deploy CA stack based on mode (init always creates the "default" scope CA)
     match config.ca_mode:
         case CAMode.SELF_SIGNED:
             match create_self_signed_ca(
                 ctx,
                 config.namespace,
                 init_result.bucket_name,
-                config.ca_validity_years,
+                scope="default",
+                validity_years=config.ca_validity_years,
             ):
                 case Err() as e:
                     return e
                 case Ok(self_signed_result):
-                    new_state.ca = CA(
+                    new_state.cas["default"] = CA(
                         stack_name=self_signed_result.stack_name,
                         mode=CAMode.SELF_SIGNED,
                         trust_anchor_arn=self_signed_result.trust_anchor_arn,
                     )
 
         case CAMode.PCA_NEW:
-            match create_pca_ca(ctx, config.namespace, validity_years=config.ca_validity_years):
+            match create_pca_ca(
+                ctx,
+                config.namespace,
+                scope="default",
+                validity_years=config.ca_validity_years,
+            ):
                 case Err() as e:
                     return e
                 case Ok(pca_new_result):
-                    new_state.ca = CA(
+                    new_state.cas["default"] = CA(
                         stack_name=pca_new_result.stack_name,
                         mode=CAMode.PCA_NEW,
                         trust_anchor_arn=pca_new_result.trust_anchor_arn,
@@ -95,11 +101,11 @@ def init(ctx: AwsContext, config: InitConfig) -> Result[State, InitError]:
                 return Err(
                     StackDeployError("", "INVALID_CONFIG", "pca_arn required for PCA_EXISTING mode")
                 )
-            match attach_existing_pca(ctx, config.namespace, config.pca_arn):
+            match attach_existing_pca(ctx, config.namespace, config.pca_arn, scope="default"):
                 case Err() as e:
                     return e
                 case Ok(pca_existing_result):
-                    new_state.ca = CA(
+                    new_state.cas["default"] = CA(
                         stack_name=pca_existing_result.stack_name,
                         mode=CAMode.PCA_EXISTING,
                         trust_anchor_arn=pca_existing_result.trust_anchor_arn,

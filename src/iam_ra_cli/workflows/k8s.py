@@ -26,10 +26,10 @@ from iam_ra_cli.lib.k8s import (
     generate_cluster_manifests,
     generate_workload_manifests,
 )
-from iam_ra_cli.lib.paths import data_dir
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.lib.storage.s3 import read_object
 from iam_ra_cli.models import CAMode, K8sCluster, K8sWorkload
+from iam_ra_cli.operations.ca import _ca_cert_s3_key, _ca_key_local_path
 
 # =============================================================================
 # Error Type Aliases
@@ -103,11 +103,6 @@ class ListResult:
 # =============================================================================
 
 
-def _ca_cert_s3_key(namespace: str) -> str:
-    """S3 key for CA certificate."""
-    return f"{namespace}/ca/certificate.pem"
-
-
 def setup(
     ctx: AwsContext,
     namespace: str,
@@ -158,7 +153,7 @@ def setup(
 
     # Load CA certificate from S3
     bucket_name = state.init.bucket_arn.resource_id
-    ca_cert_key = _ca_cert_s3_key(namespace)
+    ca_cert_key = _ca_cert_s3_key(namespace, "default")
 
     match read_object(ctx.s3, bucket_name, ca_cert_key):
         case Err(e):
@@ -167,7 +162,7 @@ def setup(
             pass
 
     # Load CA private key from local storage
-    ca_key_path = data_dir() / namespace / "ca-private-key.pem"
+    ca_key_path = _ca_key_local_path(namespace, "default")
     if not ca_key_path.exists():
         return Err(CAKeyNotFoundError(ca_key_path))
     ca_key_pem = ca_key_path.read_text()

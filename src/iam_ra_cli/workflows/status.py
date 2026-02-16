@@ -19,9 +19,14 @@ class Status:
     region: str
     initialized: bool
     init: Init | None
-    ca: CA | None
+    cas: dict[str, CA]
     roles: dict[str, Role]
     hosts: dict[str, Host]
+
+    @property
+    def ca(self) -> CA | None:
+        """Backward-compat: return the default scope CA, or None."""
+        return self.cas.get("default")
 
 
 def get_status(ctx: AwsContext, namespace: str) -> Status:
@@ -34,7 +39,7 @@ def get_status(ctx: AwsContext, namespace: str) -> Status:
                 region=ctx.region,
                 initialized=False,
                 init=None,
-                ca=None,
+                cas={},
                 roles={},
                 hosts={},
             )
@@ -45,7 +50,7 @@ def get_status(ctx: AwsContext, namespace: str) -> Status:
                 region=ctx.region,
                 initialized=False,
                 init=None,
-                ca=None,
+                cas={},
                 roles={},
                 hosts={},
             )
@@ -55,7 +60,7 @@ def get_status(ctx: AwsContext, namespace: str) -> Status:
                 region=state.region,
                 initialized=state.is_initialized,
                 init=state.init,
-                ca=state.ca,
+                cas=state.cas,
                 roles=state.roles,
                 hosts=state.hosts,
             )
@@ -66,7 +71,7 @@ def get_status(ctx: AwsContext, namespace: str) -> Status:
         region=ctx.region,
         initialized=False,
         init=None,
-        ca=None,
+        cas={},
         roles={},
         hosts={},
     )

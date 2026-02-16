@@ -92,6 +92,7 @@ def init(
         echo_key_value("KMS Key", str(state.init.kms_key_arn), indent=1)
     if state.ca:
         echo_key_value("Trust Anchor", str(state.ca.trust_anchor_arn), indent=1)
+        echo_key_value("Scope", "default", indent=1)
 
     click.echo()
     click.echo("Next steps:")

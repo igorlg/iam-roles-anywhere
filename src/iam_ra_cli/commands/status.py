@@ -61,13 +61,15 @@ def status(
         echo_key_value("KMS Key", str(current.init.kms_key_arn), indent=1)
 
     # CA info
-    if current.ca:
-        echo_section("Certificate Authority")
-        echo_key_value("Stack", current.ca.stack_name, indent=1)
-        echo_key_value("Mode", current.ca.mode.value, indent=1)
-        echo_key_value("Trust Anchor", str(current.ca.trust_anchor_arn), indent=1)
-        if current.ca.pca_arn:
-            echo_key_value("PCA ARN", str(current.ca.pca_arn), indent=1)
+    if current.cas:
+        echo_section(f"Certificate Authorities ({len(current.cas)})")
+        for scope_name, ca in sorted(current.cas.items()):
+            click.echo(f"  [{scope_name}]")
+            echo_key_value("Stack", ca.stack_name, indent=2)
+            echo_key_value("Mode", ca.mode.value, indent=2)
+            echo_key_value("Trust Anchor", str(ca.trust_anchor_arn), indent=2)
+            if ca.pca_arn:
+                echo_key_value("PCA ARN", str(ca.pca_arn), indent=2)
 
     # Roles
     echo_section(f"Roles ({len(current.roles)})")

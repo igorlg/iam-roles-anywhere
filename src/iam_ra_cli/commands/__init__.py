@@ -1,5 +1,6 @@
 """Commands layer - CLI facade over workflows."""
 
+from iam_ra_cli.commands.ca import ca
 from iam_ra_cli.commands.destroy import destroy
 from iam_ra_cli.commands.host import host
 from iam_ra_cli.commands.init import init
@@ -11,6 +12,7 @@ __all__ = [
     "init",
     "destroy",
     "status",
+    "ca",
     "role",
     "host",
     "k8s",

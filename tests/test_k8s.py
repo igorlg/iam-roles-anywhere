@@ -67,8 +67,8 @@ def aws_context(monkeypatch):
         data_dir.mkdir()
         monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
 
-        # Create CA private key in the expected location
-        ca_key_dir = data_dir / "iam-ra" / "default"
+        # Create CA private key in the scoped location
+        ca_key_dir = data_dir / "iam-ra" / "default" / "scopes" / "default"
         ca_key_dir.mkdir(parents=True)
         (ca_key_dir / "ca-private-key.pem").write_text(SAMPLE_CA_KEY)
 
@@ -86,10 +86,10 @@ def initialized_state(aws_context: AwsContext) -> State:
     # Create S3 bucket
     aws_context.s3.create_bucket(Bucket="test-bucket")
 
-    # Upload CA cert
+    # Upload CA cert to scoped S3 path
     aws_context.s3.put_object(
         Bucket="test-bucket",
-        Key="default/ca/certificate.pem",
+        Key="default/scopes/default/ca/certificate.pem",
         Body=SAMPLE_CA_CERT.encode(),
     )
 

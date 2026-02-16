@@ -15,6 +15,8 @@ import click
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     CAKeyNotFoundError,
+    CAScopeAlreadyExistsError,
+    CAScopeNotFoundError,
     HostAlreadyExistsError,
     HostNotFoundError,
     K8sClusterAlreadyExistsError,
@@ -176,6 +178,12 @@ def _format_error(error: Any) -> str:
 
         case CAKeyNotFoundError(expected_path):
             return f"CA private key not found at '{expected_path}'. Was 'iam-ra init' run on this machine?"
+
+        case CAScopeNotFoundError(namespace, scope):
+            return f"CA scope '{scope}' not found in namespace '{namespace}'. Run 'iam-ra ca setup --scope {scope}' first."
+
+        case CAScopeAlreadyExistsError(namespace, scope):
+            return f"CA scope '{scope}' already exists in namespace '{namespace}'."
 
         case StackDeployError(stack_name, status, reason):
             return f"Failed to deploy stack '{stack_name}': {status} - {reason}"
