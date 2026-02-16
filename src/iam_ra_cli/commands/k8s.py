@@ -1,5 +1,7 @@
 """Kubernetes commands - manage K8s clusters and workloads for Roles Anywhere."""
 
+import sys
+
 import click
 
 from iam_ra_cli.commands.common import (
@@ -12,6 +14,7 @@ from iam_ra_cli.commands.common import (
     namespace_option,
     to_json,
 )
+from iam_ra_cli.lib.result import Ok
 from iam_ra_cli.workflows import k8s as k8s_workflow
 
 
