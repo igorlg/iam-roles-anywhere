@@ -36,7 +36,7 @@ Parameters:
 Outputs:
   Version:
     Description: Template version
-    Value: "2.0.1"
+    Value: "2.0.2"
 
   TrustAnchorArn:
     Description: IAM Roles Anywhere Trust Anchor ARN
