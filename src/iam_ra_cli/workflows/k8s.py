@@ -112,12 +112,15 @@ def setup(
     ctx: AwsContext,
     namespace: str,
     cluster_name: str,
-    k8s_namespace: str = "default",
 ) -> Result[SetupResult, SetupError]:
     """Set up a K8s cluster for IAM Roles Anywhere.
 
     Creates cluster-level manifests (CA Secret + Issuer) for cert-manager.
     Only supported for self-signed CA mode.
+
+    Note: In v2, per-namespace CA setup is handled by scopes. This command
+    just registers the cluster. CA manifests use the default scope's CA
+    for backward compatibility.
 
     Idempotent: if the cluster already exists, regenerates and returns
     the manifests without modifying state.
@@ -126,7 +129,6 @@ def setup(
         ctx: AWS context
         namespace: IAM-RA namespace
         cluster_name: Logical name for the K8s cluster
-        k8s_namespace: K8s namespace for CA secret and issuer
 
     Returns:
         SetupResult with cluster info and manifests
@@ -144,11 +146,15 @@ def setup(
         return Err(NotInitializedError(namespace))
 
     assert state.init is not None
-    assert state.ca is not None
+
+    # Get the default CA for backward compat
+    default_ca = state.cas.get("default")
+    if default_ca is None:
+        return Err(NotInitializedError(namespace))
 
     # Only self-signed CA is supported for K8s
-    if state.ca.mode != CAMode.SELF_SIGNED:
-        return Err(K8sUnsupportedCAModeError(state.ca.mode.value))
+    if default_ca.mode != CAMode.SELF_SIGNED:
+        return Err(K8sUnsupportedCAModeError(default_ca.mode.value))
 
     # Load CA certificate from S3
     bucket_name = state.init.bucket_arn.resource_id
@@ -170,14 +176,11 @@ def setup(
     manifests = generate_cluster_manifests(
         ca_cert_pem=ca_cert_pem,
         ca_key_pem=ca_key_pem,
-        namespace=k8s_namespace,
     )
 
     # Create or retrieve cluster record (idempotent)
     already_exists = cluster_name in state.k8s_clusters
-    cluster = state.k8s_clusters.get(
-        cluster_name, K8sCluster(name=cluster_name, k8s_namespace=k8s_namespace)
-    )
+    cluster = state.k8s_clusters.get(cluster_name, K8sCluster(name=cluster_name))
 
     if not already_exists:
         state.k8s_clusters[cluster_name] = cluster
@@ -284,13 +287,16 @@ def onboard(
     if not state.is_initialized:
         return Err(NotInitializedError(namespace))
 
-    assert state.ca is not None
+    assert state.init is not None
+
+    # Get the default CA (backward compat - will be replaced by scope lookup in Phase 4)
+    default_ca = state.cas.get("default")
+    if default_ca is None:
+        return Err(NotInitializedError(namespace))
 
     # Check cluster exists
     if cluster_name not in state.k8s_clusters:
         return Err(K8sClusterNotFoundError(cluster_name))
-
-    cluster = state.k8s_clusters[cluster_name]
 
     # Check role exists
     if role_name not in state.roles:
@@ -298,39 +304,18 @@ def onboard(
 
     role = state.roles[role_name]
 
-    # If the workload namespace differs from the cluster's setup namespace,
-    # we need the CA material to generate a namespace-local Issuer + CA Secret.
-    ca_cert_pem: str | None = None
-    ca_key_pem: str | None = None
-
-    if cluster.k8s_namespace != k8s_namespace:
-        assert state.init is not None
-        bucket_name = state.init.bucket_arn.resource_id
-        ca_cert_key = _ca_cert_s3_key(namespace)
-
-        match read_object(ctx.s3, bucket_name, ca_cert_key):
-            case Err(e):
-                return Err(e)
-            case Ok(cert_pem):
-                ca_cert_pem = cert_pem
-
-        ca_key_path = data_dir() / namespace / "ca-private-key.pem"
-        if not ca_key_path.exists():
-            return Err(CAKeyNotFoundError(ca_key_path))
-        ca_key_pem = ca_key_path.read_text()
+    # TODO(Phase 4): Look up scope from role.scope, use scope's CA + Trust Anchor
+    # For now, use the default CA's trust anchor for all workloads.
 
     # Generate manifests
     manifests = generate_workload_manifests(
         workload_name=workload_name,
-        trust_anchor_arn=str(state.ca.trust_anchor_arn),
+        trust_anchor_arn=str(default_ca.trust_anchor_arn),
         profile_arn=str(role.profile_arn),
         role_arn=str(role.role_arn),
         namespace=k8s_namespace,
         duration_hours=duration_hours,
         include_sample_pod=include_sample_pod,
-        cluster_namespace=cluster.k8s_namespace,
-        ca_cert_pem=ca_cert_pem,
-        ca_key_pem=ca_key_pem,
     )
 
     # Create or retrieve workload record (idempotent)

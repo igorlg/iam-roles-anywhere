@@ -57,13 +57,15 @@ def initialized_state() -> State:
             bucket_arn=Arn("arn:aws:s3:::test-bucket"),
             kms_key_arn=Arn("arn:aws:kms:ap-southeast-2:123456789012:key/test-key"),
         ),
-        ca=CA(
-            stack_name="iam-ra-test-rootca",
-            mode=CAMode.SELF_SIGNED,
-            trust_anchor_arn=Arn(
-                "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-123"
+        cas={
+            "default": CA(
+                stack_name="iam-ra-test-rootca",
+                mode=CAMode.SELF_SIGNED,
+                trust_anchor_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-123"
+                ),
             ),
-        ),
+        },
     )
 
 

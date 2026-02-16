@@ -110,13 +110,15 @@ def initialized_state(aws_context: AwsContext) -> State:
             bucket_arn=Arn("arn:aws:s3:::test-bucket"),
             kms_key_arn=Arn("arn:aws:kms:us-east-1:123456789012:key/test-key"),
         ),
-        ca=CA(
-            stack_name="iam-ra-default-ca",
-            mode=CAMode.SELF_SIGNED,
-            trust_anchor_arn=Arn(
-                "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-123"
+        cas={
+            "default": CA(
+                stack_name="iam-ra-default-ca",
+                mode=CAMode.SELF_SIGNED,
+                trust_anchor_arn=Arn(
+                    "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-123"
+                ),
             ),
-        ),
+        },
         roles={
             "admin": Role(
                 stack_name="iam-ra-default-role-admin",
@@ -483,11 +485,10 @@ class TestSetup:
 
     def test_setup_creates_cluster(self, aws_context, initialized_state):
         """Should create cluster and return manifests."""
-        result = setup(aws_context, "default", "prod-cluster", k8s_namespace="cert-manager")
+        result = setup(aws_context, "default", "prod-cluster")
 
         assert isinstance(result, Ok)
         assert result.value.cluster.name == "prod-cluster"
-        assert result.value.cluster.k8s_namespace == "cert-manager"
         assert result.value.manifests.ca_secret is not None
         assert result.value.manifests.issuer is not None
 
@@ -602,51 +603,14 @@ class TestOnboard:
         assert "role/admin" in configmap
 
     def test_onboard_same_namespace_no_cluster_manifests(self, aws_context, initialized_state):
-        """Should NOT include cluster manifests when workload is in the same namespace as setup."""
-        setup(aws_context, "default", "prod", k8s_namespace="cert-manager")
+        """Onboard without cross-namespace should not include cluster manifests."""
+        setup(aws_context, "default", "prod")
         result = onboard(
             aws_context, "default", "my-app", "prod", "admin", k8s_namespace="cert-manager"
         )
 
         assert isinstance(result, Ok)
         assert result.value.manifests.cluster_manifests is None
-
-    def test_onboard_cross_namespace_includes_cluster_manifests(
-        self, aws_context, initialized_state
-    ):
-        """Should include CA Secret + Issuer when workload namespace differs from setup namespace."""
-        setup(aws_context, "default", "prod", k8s_namespace="cert-manager")
-        result = onboard(
-            aws_context, "default", "my-app", "prod", "admin", k8s_namespace="longhorn-system"
-        )
-
-        assert isinstance(result, Ok)
-        manifests = result.value.manifests
-        assert manifests.cluster_manifests is not None
-        assert "kind: Secret" in manifests.cluster_manifests.ca_secret
-        assert "kind: Issuer" in manifests.cluster_manifests.issuer
-        assert "namespace: longhorn-system" in manifests.cluster_manifests.ca_secret
-        assert "namespace: longhorn-system" in manifests.cluster_manifests.issuer
-
-    def test_onboard_cross_namespace_yaml_includes_all(self, aws_context, initialized_state):
-        """Should include cluster manifests in combined YAML output."""
-        setup(aws_context, "default", "prod", k8s_namespace="cert-manager")
-        result = onboard(
-            aws_context,
-            "default",
-            "my-app",
-            "prod",
-            "admin",
-            k8s_namespace="longhorn-system",
-            include_sample_pod=False,
-        )
-
-        assert isinstance(result, Ok)
-        yaml = result.value.manifests.to_yaml()
-        assert "kind: Secret" in yaml
-        assert "kind: Issuer" in yaml
-        assert "kind: Certificate" in yaml
-        assert "kind: ConfigMap" in yaml
 
 
 class TestOffboard:
