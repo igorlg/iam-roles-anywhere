@@ -26,7 +26,7 @@ from iam_ra_cli.lib.errors import (
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.lib.storage.s3 import delete_object, object_exists, read_object, write_object
-from iam_ra_cli.models import CA
+from iam_ra_cli.models import CA, Arn
 from iam_ra_cli.operations.ca import (
     ROOTCA_SELF_SIGNED_TEMPLATE,
     _ca_cert_s3_key,
@@ -112,7 +112,7 @@ def migrate_ca_stack(
     old_stack_name: str,
     bucket_name: str,
     trust_anchor_arn: str,
-) -> Result[bool, StackDeployError | StackDeleteError]:
+) -> Result[str, StackDeployError | StackDeleteError]:
     """Migrate a CA's CFN stack from v1 to v2.
 
     Creates a new stack with v2 naming/template, then deletes the old one.
@@ -124,7 +124,7 @@ def migrate_ca_stack(
     same CA cert. Role stacks are updated separately to reference the
     new Trust Anchor ARN.
 
-    Returns True if migration happened, False if skipped (already v2).
+    Returns the new Trust Anchor ARN from the new stack.
     """
     new_stack_name = ca_stack_name(namespace, scope)
     cert_s3_key = _ca_cert_s3_key(namespace, scope)
@@ -146,8 +146,8 @@ def migrate_ca_stack(
     ):
         case Err() as e:
             return e
-        case Ok(_):
-            pass
+        case Ok(outputs):
+            new_trust_anchor_arn = outputs["TrustAnchorArn"]
 
     # New stack is up -- safe to delete the old one
     match delete_stack(ctx.cfn, old_stack_name):
@@ -156,7 +156,7 @@ def migrate_ca_stack(
         case Ok(_):
             pass
 
-    return Ok(True)
+    return Ok(new_trust_anchor_arn)
 
 
 # =============================================================================
@@ -254,14 +254,14 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
         ):
             case Err() as e:
                 return e
-            case Ok(_):
+            case Ok(new_trust_anchor_arn):
                 pass
 
-        # Update state with new stack name
+        # Update state with new stack name and new trust anchor ARN
         state.cas[scope] = CA(
             stack_name=expected_v2_name,
             mode=ca.mode,
-            trust_anchor_arn=ca.trust_anchor_arn,
+            trust_anchor_arn=Arn(new_trust_anchor_arn),
             pca_arn=ca.pca_arn,
         )
         ca_stack_migrated = True
