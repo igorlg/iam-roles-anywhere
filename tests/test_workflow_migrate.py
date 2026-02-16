@@ -37,6 +37,7 @@ from iam_ra_cli.workflows.migrate import MigrateResult, migrate
 
 SAMPLE_CA_CERT = "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----"
 SAMPLE_CA_KEY = "-----BEGIN EC PRIVATE KEY-----\nMHcfake\n-----END EC PRIVATE KEY-----"
+MIGRATED_TA_ARN = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-v2-migrated"
 
 
 @pytest.fixture
@@ -162,7 +163,7 @@ class TestMigrateState:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result = migrate(ctx, "test")
@@ -190,7 +191,7 @@ class TestMigrateState:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result = migrate(ctx, "test")
@@ -215,7 +216,7 @@ class TestMigrateState:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result = migrate(ctx, "test")
@@ -240,7 +241,7 @@ class TestMigrateState:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result = migrate(ctx, "test")
@@ -274,7 +275,7 @@ class TestMigrateS3Paths:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 migrate(ctx, "test")
@@ -301,7 +302,7 @@ class TestMigrateS3Paths:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 migrate(ctx, "test")
@@ -334,7 +335,7 @@ class TestMigrateS3Paths:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result = migrate(ctx, "test")
@@ -367,7 +368,7 @@ class TestMigrateLocalKey:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 migrate(ctx, "test")
@@ -392,7 +393,7 @@ class TestMigrateLocalKey:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 migrate(ctx, "test")
@@ -418,7 +419,7 @@ class TestMigrateLocalKey:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result = migrate(ctx, "test")
@@ -436,7 +437,7 @@ class TestMigrateRoleStacks:
     """Role CFN stacks should be updated with TrustAnchorArn parameter."""
 
     def test_updates_each_role_stack(self, aws_credentials, temp_xdg_dirs) -> None:
-        """Each role should have its CFN stack updated."""
+        """Each role should have its CFN stack updated with the migrated trust anchor."""
         captured_calls = []
 
         def fake_update(ctx, namespace, name, trust_anchor_arn, policies, scope):
@@ -461,7 +462,7 @@ class TestMigrateRoleStacks:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result = migrate(ctx, "test")
@@ -469,11 +470,12 @@ class TestMigrateRoleStacks:
             assert isinstance(result, Ok)
             assert len(captured_calls) == 1
             assert captured_calls[0]["name"] == "admin"
-            assert "ta-v1" in captured_calls[0]["trust_anchor_arn"]
+            # Role gets the NEW trust anchor ARN from the migrated CA stack
+            assert captured_calls[0]["trust_anchor_arn"] == MIGRATED_TA_ARN
             assert captured_calls[0]["scope"] == "default"
 
     def test_passes_correct_trust_anchor(self, aws_credentials, temp_xdg_dirs) -> None:
-        """Should pass the default scope's trust anchor ARN to role stack update."""
+        """Should pass the migrated scope's trust anchor ARN to role stack update."""
         captured_ta = {}
 
         def fake_update(ctx, namespace, name, trust_anchor_arn, policies, scope):
@@ -492,15 +494,12 @@ class TestMigrateRoleStacks:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 migrate(ctx, "test")
 
-            assert (
-                captured_ta["admin"]
-                == "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-v1"
-            )
+            assert captured_ta["admin"] == MIGRATED_TA_ARN
 
     def test_reports_updated_roles(self, aws_credentials, temp_xdg_dirs) -> None:
         """MigrateResult should list which roles were updated."""
@@ -516,7 +515,7 @@ class TestMigrateRoleStacks:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result = migrate(ctx, "test")
@@ -538,7 +537,7 @@ class TestMigrateRoleStacks:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result = migrate(ctx, "test")
@@ -720,7 +719,7 @@ class TestMigrateCAStack:
                     "bucket_name": bucket_name,
                 }
             )
-            return Ok(True)
+            return Ok(MIGRATED_TA_ARN)
 
         with mock_aws():
             ctx = AwsContext(region="ap-southeast-2")
@@ -749,7 +748,7 @@ class TestMigrateCAStack:
         new_ta_arn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-v2-new"
 
         def fake_migrate_ca(ctx, namespace, scope, old_stack_name, bucket_name, trust_anchor_arn):
-            return Ok(True)
+            return Ok(MIGRATED_TA_ARN)
 
         with mock_aws():
             ctx = AwsContext(region="ap-southeast-2")
@@ -779,7 +778,7 @@ class TestMigrateCAStack:
         """MigrateResult should report ca_stack_migrated=True when migration occurs."""
 
         def fake_migrate_ca(ctx, namespace, scope, old_stack_name, bucket_name, trust_anchor_arn):
-            return Ok(True)
+            return Ok(MIGRATED_TA_ARN)
 
         with mock_aws():
             ctx = AwsContext(region="ap-southeast-2")
@@ -859,13 +858,43 @@ class TestMigrateCAStack:
             mock_migrate_ca.assert_not_called()
             assert not result.value.ca_stack_migrated
 
+    def test_updates_state_with_new_trust_anchor_arn(self, aws_credentials, temp_xdg_dirs) -> None:
+        """After CA stack migration, state should have the new trust anchor ARN."""
+        new_ta_arn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-v2-fresh"
+
+        def fake_migrate_ca(ctx, namespace, scope, old_stack_name, bucket_name, trust_anchor_arn):
+            return Ok(new_ta_arn)
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_v1_in_aws(ctx, with_roles=False)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    side_effect=fake_migrate_ca,
+                ),
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+
+            response = ctx.s3.get_object(Bucket="test-bucket", Key="test/state.json")
+            raw = json.loads(response["Body"].read().decode())
+            assert raw["cas"]["default"]["trust_anchor_arn"] == new_ta_arn
+
     def test_role_stacks_get_new_trust_anchor(self, aws_credentials, temp_xdg_dirs) -> None:
         """After CA migration creates new trust anchor, role stacks should use new ARN."""
         new_ta_arn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-v2-new"
         captured_ta = {}
 
         def fake_migrate_ca(ctx, namespace, scope, old_stack_name, bucket_name, trust_anchor_arn):
-            return Ok(True)
+            return Ok(new_ta_arn)
 
         def fake_update_role(ctx, namespace, name, trust_anchor_arn, policies, scope):
             captured_ta[name] = trust_anchor_arn
@@ -889,9 +918,8 @@ class TestMigrateCAStack:
                 result = migrate(ctx, "test")
 
             assert isinstance(result, Ok)
-            # Role should still use the trust anchor from state
-            # (migrate_ca_stack is mocked, so state isn't actually updated with new TA)
-            assert "admin" in captured_ta
+            # Role must get the NEW trust anchor ARN from the migrated CA stack
+            assert captured_ta["admin"] == new_ta_arn
 
 
 # =============================================================================
@@ -916,7 +944,7 @@ class TestMigrateIdempotency:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.migrate_ca_stack",
-                    return_value=Ok(True),
+                    return_value=Ok(MIGRATED_TA_ARN),
                 ),
             ):
                 result1 = migrate(ctx, "test")
