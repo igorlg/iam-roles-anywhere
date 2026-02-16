@@ -10,9 +10,9 @@ from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     CAKeyNotFoundError,
+    CAScopeNotFoundError,
     K8sClusterInUseError,
     K8sClusterNotFoundError,
-    K8sUnsupportedCAModeError,
     K8sWorkloadNotFoundError,
     NotInitializedError,
     RoleNotFoundError,
@@ -21,9 +21,7 @@ from iam_ra_cli.lib.errors import (
     StateSaveError,
 )
 from iam_ra_cli.lib.k8s import (
-    ClusterManifests,
     WorkloadManifests,
-    generate_cluster_manifests,
     generate_workload_manifests,
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
@@ -35,14 +33,7 @@ from iam_ra_cli.operations.ca import _ca_cert_s3_key, _ca_key_local_path
 # Error Type Aliases
 # =============================================================================
 
-type SetupError = (
-    NotInitializedError
-    | K8sUnsupportedCAModeError
-    | CAKeyNotFoundError
-    | S3ReadError
-    | StateLoadError
-    | StateSaveError
-)
+type SetupError = NotInitializedError | StateLoadError | StateSaveError
 
 type TeardownError = (
     NotInitializedError
@@ -56,6 +47,7 @@ type OnboardError = (
     NotInitializedError
     | K8sClusterNotFoundError
     | RoleNotFoundError
+    | CAScopeNotFoundError
     | CAKeyNotFoundError
     | S3ReadError
     | StateLoadError
@@ -79,7 +71,6 @@ class SetupResult:
     """Result of cluster setup."""
 
     cluster: K8sCluster
-    manifests: ClusterManifests
 
 
 @dataclass(frozen=True)
@@ -108,17 +99,13 @@ def setup(
     namespace: str,
     cluster_name: str,
 ) -> Result[SetupResult, SetupError]:
-    """Set up a K8s cluster for IAM Roles Anywhere.
+    """Register a K8s cluster for IAM Roles Anywhere.
 
-    Creates cluster-level manifests (CA Secret + Issuer) for cert-manager.
-    Only supported for self-signed CA mode.
+    Just registers the cluster in state. CA manifests are generated
+    per-namespace during onboard using the role's scope CA.
 
-    Note: In v2, per-namespace CA setup is handled by scopes. This command
-    just registers the cluster. CA manifests use the default scope's CA
-    for backward compatibility.
-
-    Idempotent: if the cluster already exists, regenerates and returns
-    the manifests without modifying state.
+    Idempotent: if the cluster already exists, returns it without
+    modifying state.
 
     Args:
         ctx: AWS context
@@ -126,7 +113,7 @@ def setup(
         cluster_name: Logical name for the K8s cluster
 
     Returns:
-        SetupResult with cluster info and manifests
+        SetupResult with cluster info
     """
     # Load state
     match state_module.load(ctx.ssm, ctx.s3, namespace):
@@ -140,39 +127,6 @@ def setup(
     if not state.is_initialized:
         return Err(NotInitializedError(namespace))
 
-    assert state.init is not None
-
-    # Get the default CA for backward compat
-    default_ca = state.cas.get("default")
-    if default_ca is None:
-        return Err(NotInitializedError(namespace))
-
-    # Only self-signed CA is supported for K8s
-    if default_ca.mode != CAMode.SELF_SIGNED:
-        return Err(K8sUnsupportedCAModeError(default_ca.mode.value))
-
-    # Load CA certificate from S3
-    bucket_name = state.init.bucket_arn.resource_id
-    ca_cert_key = _ca_cert_s3_key(namespace, "default")
-
-    match read_object(ctx.s3, bucket_name, ca_cert_key):
-        case Err(e):
-            return Err(e)
-        case Ok(ca_cert_pem):
-            pass
-
-    # Load CA private key from local storage
-    ca_key_path = _ca_key_local_path(namespace, "default")
-    if not ca_key_path.exists():
-        return Err(CAKeyNotFoundError(ca_key_path))
-    ca_key_pem = ca_key_path.read_text()
-
-    # Generate manifests
-    manifests = generate_cluster_manifests(
-        ca_cert_pem=ca_cert_pem,
-        ca_key_pem=ca_key_pem,
-    )
-
     # Create or retrieve cluster record (idempotent)
     already_exists = cluster_name in state.k8s_clusters
     cluster = state.k8s_clusters.get(cluster_name, K8sCluster(name=cluster_name))
@@ -185,7 +139,7 @@ def setup(
             case Ok(_):
                 pass
 
-    return Ok(SetupResult(cluster=cluster, manifests=manifests))
+    return Ok(SetupResult(cluster=cluster))
 
 
 def teardown(
@@ -252,7 +206,14 @@ def onboard(
 ) -> Result[OnboardResult, OnboardError]:
     """Onboard a K8s workload to IAM Roles Anywhere.
 
-    Generates workload-level manifests (Certificate + ConfigMap + optional sample Pod).
+    Generates all manifests for the workload's namespace:
+    - CA Secret + Issuer (using the role's scope CA)
+    - Certificate (signed by the scope's Issuer)
+    - ConfigMap (with scope's Trust Anchor ARN)
+    - Optional sample Pod
+
+    The scope is derived from the role: each role belongs to a scope,
+    and its scope's CA provides cryptographic isolation per namespace.
 
     Idempotent: if the workload already exists, regenerates and returns
     the manifests without modifying state.
@@ -284,11 +245,6 @@ def onboard(
 
     assert state.init is not None
 
-    # Get the default CA (backward compat - will be replaced by scope lookup in Phase 4)
-    default_ca = state.cas.get("default")
-    if default_ca is None:
-        return Err(NotInitializedError(namespace))
-
     # Check cluster exists
     if cluster_name not in state.k8s_clusters:
         return Err(K8sClusterNotFoundError(cluster_name))
@@ -298,19 +254,47 @@ def onboard(
         return Err(RoleNotFoundError(namespace, role_name))
 
     role = state.roles[role_name]
+    scope = role.scope
 
-    # TODO(Phase 4): Look up scope from role.scope, use scope's CA + Trust Anchor
-    # For now, use the default CA's trust anchor for all workloads.
+    # Validate scope has a CA set up
+    if scope not in state.cas:
+        return Err(CAScopeNotFoundError(namespace, scope))
 
-    # Generate manifests
+    scope_ca = state.cas[scope]
+
+    # Only self-signed CA is supported for K8s
+    if scope_ca.mode != CAMode.SELF_SIGNED:
+        return Err(CAScopeNotFoundError(namespace, scope))
+
+    # Load scope's CA certificate from S3
+    bucket_name = state.init.bucket_arn.resource_id
+    ca_cert_key = _ca_cert_s3_key(namespace, scope)
+
+    match read_object(ctx.s3, bucket_name, ca_cert_key):
+        case Err(e):
+            return Err(e)
+        case Ok(ca_cert_pem):
+            pass
+
+    # Load scope's CA private key from local storage
+    ca_key_path = _ca_key_local_path(namespace, scope)
+    if not ca_key_path.exists():
+        return Err(CAKeyNotFoundError(ca_key_path))
+    ca_key_pem = ca_key_path.read_text()
+
+    # Generate manifests with scope's CA material and trust anchor
     manifests = generate_workload_manifests(
         workload_name=workload_name,
-        trust_anchor_arn=str(default_ca.trust_anchor_arn),
+        trust_anchor_arn=str(scope_ca.trust_anchor_arn),
         profile_arn=str(role.profile_arn),
         role_arn=str(role.role_arn),
         namespace=k8s_namespace,
         duration_hours=duration_hours,
         include_sample_pod=include_sample_pod,
+        # Always include CA Secret + Issuer for the namespace
+        cluster_namespace="__always_include__",
+        ca_cert_pem=ca_cert_pem,
+        ca_key_pem=ca_key_pem,
     )
 
     # Create or retrieve workload record (idempotent)
