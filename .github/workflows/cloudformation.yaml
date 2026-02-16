@@ -1,12 +1,13 @@
 # CloudFormation - Validate and lint SAM/CloudFormation templates
+#
+# Runs on every push to feature branches (path-filtered).
 
 name: CloudFormation
 
 on:
   push:
-    paths:
-      - 'src/iam_ra_cli/data/cloudformation/**'
-  pull_request:
+    branches-ignore:
+      - main
     paths:
       - 'src/iam_ra_cli/data/cloudformation/**'
 
