@@ -32,15 +32,26 @@ class ClusterManifests:
 
 @dataclass(frozen=True)
 class WorkloadManifests:
-    """Workload-level K8s manifests (Certificate + ConfigMap + optional sample Pod)."""
+    """Workload-level K8s manifests (Certificate + ConfigMap + optional sample Pod).
+
+    When the workload namespace differs from the cluster's setup namespace,
+    cluster_manifests is populated with the CA Secret + Issuer for the
+    workload's namespace.
+    """
 
     certificate: str
     configmap: str
     pod: str | None = None
+    cluster_manifests: ClusterManifests | None = None
 
     def to_yaml(self) -> str:
         """Return combined YAML with document separator."""
-        parts = [self.certificate, self.configmap]
+        parts = []
+        if self.cluster_manifests is not None:
+            parts.append(self.cluster_manifests.ca_secret)
+            parts.append(self.cluster_manifests.issuer)
+        parts.append(self.certificate)
+        parts.append(self.configmap)
         if self.pod is not None:
             parts.append(self.pod)
         return "---\n".join(parts)
@@ -92,6 +103,8 @@ def generate_issuer(
     """Generate cert-manager Issuer manifest.
 
     The Issuer references the CA Secret and is used to sign Certificate requests.
+    Each namespace that needs certificates gets its own Issuer + CA Secret copy,
+    keeping the signing authority scoped to the namespace.
 
     Args:
         name: Issuer name
@@ -353,21 +366,32 @@ def generate_workload_manifests(
     issuer_name: str = DEFAULT_ISSUER_NAME,
     duration_hours: int = DEFAULT_CERT_DURATION_HOURS,
     include_sample_pod: bool = True,
+    cluster_namespace: str | None = None,
+    ca_cert_pem: str | None = None,
+    ca_key_pem: str | None = None,
 ) -> WorkloadManifests:
     """Generate all workload-level manifests.
+
+    When the workload namespace differs from the cluster's setup namespace,
+    and CA material is provided, the output includes a copy of the CA Secret
+    and Issuer for the workload namespace. This ensures the namespace-scoped
+    Issuer is available wherever the Certificate lives.
 
     Args:
         workload_name: Name of the workload
         trust_anchor_arn: IAM Roles Anywhere Trust Anchor ARN
         profile_arn: IAM Roles Anywhere Profile ARN
         role_arn: IAM Role ARN to assume
-        namespace: K8s namespace
+        namespace: K8s namespace for the workload
         issuer_name: Name of the Issuer to reference
         duration_hours: Certificate validity in hours
         include_sample_pod: Whether to include the sample Pod manifest
+        cluster_namespace: K8s namespace where the cluster was set up (for cross-namespace detection)
+        ca_cert_pem: CA certificate PEM (required for cross-namespace)
+        ca_key_pem: CA private key PEM (required for cross-namespace)
 
     Returns:
-        WorkloadManifests with certificate, configmap, and optionally pod YAML
+        WorkloadManifests with certificate, configmap, optionally pod and cluster manifests
     """
     cert_secret_name = f"{workload_name}-cert"
 
@@ -377,6 +401,20 @@ def generate_workload_manifests(
             workload_name=workload_name,
             namespace=namespace,
             cert_secret_name=cert_secret_name,
+        )
+
+    # Include CA Secret + Issuer when workload is in a different namespace
+    cluster_manifests = None
+    if (
+        cluster_namespace is not None
+        and cluster_namespace != namespace
+        and ca_cert_pem is not None
+        and ca_key_pem is not None
+    ):
+        cluster_manifests = generate_cluster_manifests(
+            ca_cert_pem=ca_cert_pem,
+            ca_key_pem=ca_key_pem,
+            namespace=namespace,
         )
 
     return WorkloadManifests(
@@ -395,4 +433,5 @@ def generate_workload_manifests(
             namespace=namespace,
         ),
         pod=pod,
+        cluster_manifests=cluster_manifests,
     )
