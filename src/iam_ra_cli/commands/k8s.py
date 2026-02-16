@@ -64,7 +64,7 @@ def k8s_setup(
     """
     ctx = make_context(region, profile)
 
-    result = handle_result(
+    handle_result(
         k8s_workflow.setup(ctx, namespace, cluster_name),
         success_message=f"Cluster '{cluster_name}' registered!",
     )
@@ -198,7 +198,6 @@ def k8s_onboard(
     After running, apply the manifests:
       iam-ra k8s onboard cert-manager | kubectl apply -f -
     """
-    import sys
 
     from iam_ra_cli.lib import state as state_module
 

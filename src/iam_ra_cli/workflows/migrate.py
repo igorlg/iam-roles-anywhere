@@ -11,7 +11,8 @@ Idempotent: safe to run multiple times. Skips already-migrated paths.
 
 from dataclasses import dataclass, field
 
-from iam_ra_cli.lib import paths, state as state_module
+from iam_ra_cli.lib import paths
+from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     NotInitializedError,

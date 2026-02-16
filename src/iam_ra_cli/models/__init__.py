@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Self
 
 
@@ -59,7 +59,7 @@ class Arn(str):
         return res
 
 
-class CAMode(str, Enum):
+class CAMode(StrEnum):
     """Certificate Authority mode."""
 
     SELF_SIGNED = "self-signed"

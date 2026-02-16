@@ -13,7 +13,11 @@ from iam_ra_cli.commands.common import (
 )
 from iam_ra_cli.workflows.ca import (
     delete_scope as delete_scope_workflow,
+)
+from iam_ra_cli.workflows.ca import (
     list_cas as list_cas_workflow,
+)
+from iam_ra_cli.workflows.ca import (
     setup_ca as setup_ca_workflow,
 )
 

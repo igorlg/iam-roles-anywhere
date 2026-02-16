@@ -7,9 +7,9 @@ S3 cert path, local key path, and CloudFormation stack.
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    CAError,
     CAScopeAlreadyExistsError,
     CAScopeNotFoundError,
-    CAError,
     NotInitializedError,
     StackDeleteError,
     StateLoadError,
@@ -19,6 +19,8 @@ from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.models import CA, CAMode
 from iam_ra_cli.operations.ca import (
     create_self_signed_ca,
+)
+from iam_ra_cli.operations.ca import (
     delete_ca as delete_ca_op,
 )
 
