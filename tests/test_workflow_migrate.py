@@ -442,6 +442,158 @@ class TestMigrateRoleStacks:
             assert isinstance(result, Ok)
             assert result.value.roles_updated == []
 
+    def test_uses_per_role_scope_trust_anchor(self, aws_credentials, temp_xdg_dirs) -> None:
+        """Each role should get the trust anchor from its own scope, not always default."""
+        # Build a v2 state with roles in different scopes
+        state_json = json.dumps(
+            {
+                "namespace": "test",
+                "region": "ap-southeast-2",
+                "version": "2.0.0",
+                "init": {
+                    "stack_name": "iam-ra-test-init",
+                    "bucket_arn": "arn:aws:s3:::test-bucket",
+                    "kms_key_arn": "arn:aws:kms:ap-southeast-2:123456789012:key/test-key",
+                },
+                "cas": {
+                    "default": {
+                        "stack_name": "iam-ra-test-ca-default",
+                        "mode": "self-signed",
+                        "trust_anchor_arn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-default",
+                    },
+                    "cert-manager": {
+                        "stack_name": "iam-ra-test-ca-cert-manager",
+                        "mode": "self-signed",
+                        "trust_anchor_arn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-certmgr",
+                    },
+                },
+                "roles": {
+                    "admin": {
+                        "stack_name": "iam-ra-test-role-admin",
+                        "role_arn": "arn:aws:iam::123456789012:role/admin",
+                        "profile_arn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin",
+                        "policies": [],
+                        "scope": "default",
+                    },
+                    "cert-manager": {
+                        "stack_name": "iam-ra-test-role-cert-manager",
+                        "role_arn": "arn:aws:iam::123456789012:role/cert-manager",
+                        "profile_arn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/certmgr",
+                        "policies": [],
+                        "scope": "cert-manager",
+                    },
+                },
+                "hosts": {},
+                "k8s_clusters": {},
+                "k8s_workloads": {},
+            }
+        )
+
+        captured_ta = {}
+
+        def fake_update(ctx, namespace, name, trust_anchor_arn, policies, scope):
+            captured_ta[name] = trust_anchor_arn
+            return Ok(None)
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            bucket = "test-bucket"
+            ctx.s3.create_bucket(
+                Bucket=bucket,
+                CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"},
+            )
+            ctx.s3.put_object(Bucket=bucket, Key="test/state.json", Body=state_json.encode())
+            ctx.ssm.put_parameter(
+                Name="/iam-ra/test/state-location",
+                Value=f"s3://{bucket}/test/state.json",
+                Type="String",
+            )
+
+            with patch(
+                "iam_ra_cli.workflows.migrate.update_role_stack",
+                side_effect=fake_update,
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+            assert "ta-default" in captured_ta["admin"]
+            assert "ta-certmgr" in captured_ta["cert-manager"]
+
+    def test_skips_role_with_missing_scope_ca(self, aws_credentials, temp_xdg_dirs) -> None:
+        """Roles whose scope CA doesn't exist should be skipped, not cause an error."""
+        state_json = json.dumps(
+            {
+                "namespace": "test",
+                "region": "ap-southeast-2",
+                "version": "2.0.0",
+                "init": {
+                    "stack_name": "iam-ra-test-init",
+                    "bucket_arn": "arn:aws:s3:::test-bucket",
+                    "kms_key_arn": "arn:aws:kms:ap-southeast-2:123456789012:key/test-key",
+                },
+                "cas": {
+                    "default": {
+                        "stack_name": "iam-ra-test-ca-default",
+                        "mode": "self-signed",
+                        "trust_anchor_arn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-default",
+                    },
+                    # No "orphan-scope" CA
+                },
+                "roles": {
+                    "admin": {
+                        "stack_name": "iam-ra-test-role-admin",
+                        "role_arn": "arn:aws:iam::123456789012:role/admin",
+                        "profile_arn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin",
+                        "policies": [],
+                        "scope": "default",
+                    },
+                    "orphan": {
+                        "stack_name": "iam-ra-test-role-orphan",
+                        "role_arn": "arn:aws:iam::123456789012:role/orphan",
+                        "profile_arn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/orphan",
+                        "policies": [],
+                        "scope": "orphan-scope",
+                    },
+                },
+                "hosts": {},
+                "k8s_clusters": {},
+                "k8s_workloads": {},
+            }
+        )
+
+        captured_names = []
+
+        def fake_update(ctx, namespace, name, trust_anchor_arn, policies, scope):
+            captured_names.append(name)
+            return Ok(None)
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            bucket = "test-bucket"
+            ctx.s3.create_bucket(
+                Bucket=bucket,
+                CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"},
+            )
+            ctx.s3.put_object(Bucket=bucket, Key="test/state.json", Body=state_json.encode())
+            ctx.ssm.put_parameter(
+                Name="/iam-ra/test/state-location",
+                Value=f"s3://{bucket}/test/state.json",
+                Type="String",
+            )
+
+            with patch(
+                "iam_ra_cli.workflows.migrate.update_role_stack",
+                side_effect=fake_update,
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+            # Only admin should be updated, orphan skipped
+            assert "admin" in captured_names
+            assert "orphan" not in captured_names
+            assert "admin" in result.value.roles_updated
+            assert "orphan" not in result.value.roles_updated
+
 
 # =============================================================================
 # Tests: Idempotency

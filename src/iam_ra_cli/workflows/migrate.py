@@ -160,24 +160,26 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
         local_key_migrated = True
 
     # 4. Update role CFN stacks with TrustAnchorArn parameter
-    if "default" in state.cas:
-        default_ca = state.cas["default"]
-        trust_anchor_arn = str(default_ca.trust_anchor_arn)
+    for role_name, role in state.roles.items():
+        scope = role.scope
+        if scope not in state.cas:
+            continue  # skip roles whose scope CA doesn't exist yet
 
-        for role_name, role in state.roles.items():
-            policies = [str(p) for p in role.policies]
-            match update_role_stack(
-                ctx,
-                namespace=namespace,
-                name=role_name,
-                trust_anchor_arn=trust_anchor_arn,
-                policies=policies,
-                scope=role.scope,
-            ):
-                case Err() as e:
-                    return e
-                case Ok(_):
-                    roles_updated.append(role_name)
+        scope_ca = state.cas[scope]
+        trust_anchor_arn = str(scope_ca.trust_anchor_arn)
+        policies = [str(p) for p in role.policies]
+        match update_role_stack(
+            ctx,
+            namespace=namespace,
+            name=role_name,
+            trust_anchor_arn=trust_anchor_arn,
+            policies=policies,
+            scope=role.scope,
+        ):
+            case Err() as e:
+                return e
+            case Ok(_):
+                roles_updated.append(role_name)
 
     # 5. Re-save state in v2 format
     match state_module.save(ctx.ssm, ctx.s3, state):

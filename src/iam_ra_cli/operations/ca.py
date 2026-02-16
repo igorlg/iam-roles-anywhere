@@ -110,6 +110,7 @@ def create_self_signed_ca(
         template_body=template,
         parameters={
             "Namespace": namespace,
+            "Scope": scope,
             "CACertificateS3Key": cert_s3_key,
         },
         tags={
@@ -147,6 +148,7 @@ def create_pca_ca(
         template_body=template,
         parameters={
             "Namespace": namespace,
+            "Scope": scope,
             "KeyAlgorithm": key_algorithm,
             "ValidityYears": str(validity_years),
         },
@@ -183,6 +185,7 @@ def attach_existing_pca(
         template_body=template,
         parameters={
             "Namespace": namespace,
+            "Scope": scope,
             "PCAArn": pca_arn,
         },
         tags={

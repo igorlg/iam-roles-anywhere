@@ -6,6 +6,11 @@ Parameters:
     Type: String
     Description: Namespace identifier
 
+  Scope:
+    Type: String
+    Default: default
+    Description: CA scope name (for per-namespace isolation)
+
   PCAArn:
     Type: String
     Description: Existing ACM PCA Certificate Authority ARN
@@ -31,7 +36,7 @@ Resources:
   TrustAnchor:
     Type: AWS::RolesAnywhere::TrustAnchor
     Properties:
-      Name: !Sub "iam-ra-${Namespace}"
+      Name: !Sub "iam-ra-${Namespace}-${Scope}"
       Enabled: true
       Source:
         SourceType: AWS_ACM_PCA
@@ -40,17 +45,19 @@ Resources:
       Tags:
         - Key: iam-ra:namespace
           Value: !Ref Namespace
+        - Key: iam-ra:scope
+          Value: !Ref Scope
 
   TrustAnchorArnParameter:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: !Sub "/iam-ra/${Namespace}/trust-anchor-arn"
+      Name: !Sub "/iam-ra/${Namespace}/scopes/${Scope}/trust-anchor-arn"
       Type: String
       Value: !GetAtt TrustAnchor.TrustAnchorArn
 
   PCAArnParameter:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: !Sub "/iam-ra/${Namespace}/pca-arn"
+      Name: !Sub "/iam-ra/${Namespace}/scopes/${Scope}/pca-arn"
       Type: String
       Value: !Ref PCAArn
