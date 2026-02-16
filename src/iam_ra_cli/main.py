@@ -3,7 +3,7 @@
 import click
 
 from . import __version__
-from .commands import destroy, host, init, k8s, role, status
+from .commands import ca, destroy, host, init, k8s, migrate, role, status
 
 
 @click.group()
@@ -17,9 +17,11 @@ def cli() -> None:
 cli.add_command(init)
 cli.add_command(destroy)
 cli.add_command(status)
+cli.add_command(ca)
 cli.add_command(role)
 cli.add_command(host)
 cli.add_command(k8s)
+cli.add_command(migrate)
 
 
 if __name__ == "__main__":

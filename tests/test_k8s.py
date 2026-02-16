@@ -20,12 +20,16 @@ from iam_ra_cli.lib.k8s import (
     generate_sample_pod,
     generate_workload_manifests,
 )
+from iam_ra_cli.lib.errors import (
+    CAScopeNotFoundError,
+)
 from iam_ra_cli.lib.result import Err, Ok
 from iam_ra_cli.models import (
     CA,
     Arn,
     CAMode,
     Init,
+    K8sCluster,
     Role,
     State,
 )
@@ -67,8 +71,8 @@ def aws_context(monkeypatch):
         data_dir.mkdir()
         monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
 
-        # Create CA private key in the expected location
-        ca_key_dir = data_dir / "iam-ra" / "default"
+        # Create CA private key in the scoped location
+        ca_key_dir = data_dir / "iam-ra" / "default" / "scopes" / "default"
         ca_key_dir.mkdir(parents=True)
         (ca_key_dir / "ca-private-key.pem").write_text(SAMPLE_CA_KEY)
 
@@ -86,10 +90,10 @@ def initialized_state(aws_context: AwsContext) -> State:
     # Create S3 bucket
     aws_context.s3.create_bucket(Bucket="test-bucket")
 
-    # Upload CA cert
+    # Upload CA cert to scoped S3 path
     aws_context.s3.put_object(
         Bucket="test-bucket",
-        Key="default/ca/certificate.pem",
+        Key="default/scopes/default/ca/certificate.pem",
         Body=SAMPLE_CA_CERT.encode(),
     )
 
@@ -110,13 +114,15 @@ def initialized_state(aws_context: AwsContext) -> State:
             bucket_arn=Arn("arn:aws:s3:::test-bucket"),
             kms_key_arn=Arn("arn:aws:kms:us-east-1:123456789012:key/test-key"),
         ),
-        ca=CA(
-            stack_name="iam-ra-default-ca",
-            mode=CAMode.SELF_SIGNED,
-            trust_anchor_arn=Arn(
-                "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-123"
+        cas={
+            "default": CA(
+                stack_name="iam-ra-default-ca",
+                mode=CAMode.SELF_SIGNED,
+                trust_anchor_arn=Arn(
+                    "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-123"
+                ),
             ),
-        ),
+        },
         roles={
             "admin": Role(
                 stack_name="iam-ra-default-role-admin",
@@ -482,14 +488,11 @@ class TestSetup:
     """Tests for k8s setup workflow."""
 
     def test_setup_creates_cluster(self, aws_context, initialized_state):
-        """Should create cluster and return manifests."""
-        result = setup(aws_context, "default", "prod-cluster", k8s_namespace="cert-manager")
+        """Should create cluster and return result."""
+        result = setup(aws_context, "default", "prod-cluster")
 
         assert isinstance(result, Ok)
         assert result.value.cluster.name == "prod-cluster"
-        assert result.value.cluster.k8s_namespace == "cert-manager"
-        assert result.value.manifests.ca_secret is not None
-        assert result.value.manifests.issuer is not None
 
     def test_setup_fails_if_not_initialized(self, aws_context):
         """Should fail if namespace not initialized."""
@@ -507,7 +510,6 @@ class TestSetup:
         result2 = setup(aws_context, "default", "prod")
         assert isinstance(result2, Ok)
         assert result2.value.cluster.name == "prod"
-        assert result2.value.manifests.ca_secret is not None
 
         # Should still be only one cluster in state
         list_result = list_k8s(aws_context, "default")
@@ -575,7 +577,7 @@ class TestOnboard:
         assert isinstance(result, Err)
 
     def test_onboard_is_idempotent(self, aws_context, initialized_state):
-        """Should succeed if workload already exists (idempotent)."""
+        """Should succeed if workload already exists (idempotent) with identical YAML."""
         setup(aws_context, "default", "prod")
         result1 = onboard(aws_context, "default", "my-app", "prod", "admin")
         assert isinstance(result1, Ok)
@@ -583,7 +585,9 @@ class TestOnboard:
         result2 = onboard(aws_context, "default", "my-app", "prod", "admin")
         assert isinstance(result2, Ok)
         assert result2.value.workload.name == "my-app"
-        assert result2.value.manifests.configmap is not None
+
+        # Manifests must be identical on second run
+        assert result1.value.manifests.to_yaml() == result2.value.manifests.to_yaml()
 
         # Should still be only one workload in state
         list_result = list_k8s(aws_context, "default")
@@ -601,52 +605,17 @@ class TestOnboard:
         assert "profile/admin-profile" in configmap
         assert "role/admin" in configmap
 
-    def test_onboard_same_namespace_no_cluster_manifests(self, aws_context, initialized_state):
-        """Should NOT include cluster manifests when workload is in the same namespace as setup."""
-        setup(aws_context, "default", "prod", k8s_namespace="cert-manager")
+    def test_onboard_always_includes_cluster_manifests(self, aws_context, initialized_state):
+        """Onboard should always include CA Secret + Issuer for the workload namespace."""
+        setup(aws_context, "default", "prod")
         result = onboard(
             aws_context, "default", "my-app", "prod", "admin", k8s_namespace="cert-manager"
         )
 
         assert isinstance(result, Ok)
-        assert result.value.manifests.cluster_manifests is None
-
-    def test_onboard_cross_namespace_includes_cluster_manifests(
-        self, aws_context, initialized_state
-    ):
-        """Should include CA Secret + Issuer when workload namespace differs from setup namespace."""
-        setup(aws_context, "default", "prod", k8s_namespace="cert-manager")
-        result = onboard(
-            aws_context, "default", "my-app", "prod", "admin", k8s_namespace="longhorn-system"
-        )
-
-        assert isinstance(result, Ok)
-        manifests = result.value.manifests
-        assert manifests.cluster_manifests is not None
-        assert "kind: Secret" in manifests.cluster_manifests.ca_secret
-        assert "kind: Issuer" in manifests.cluster_manifests.issuer
-        assert "namespace: longhorn-system" in manifests.cluster_manifests.ca_secret
-        assert "namespace: longhorn-system" in manifests.cluster_manifests.issuer
-
-    def test_onboard_cross_namespace_yaml_includes_all(self, aws_context, initialized_state):
-        """Should include cluster manifests in combined YAML output."""
-        setup(aws_context, "default", "prod", k8s_namespace="cert-manager")
-        result = onboard(
-            aws_context,
-            "default",
-            "my-app",
-            "prod",
-            "admin",
-            k8s_namespace="longhorn-system",
-            include_sample_pod=False,
-        )
-
-        assert isinstance(result, Ok)
-        yaml = result.value.manifests.to_yaml()
-        assert "kind: Secret" in yaml
-        assert "kind: Issuer" in yaml
-        assert "kind: Certificate" in yaml
-        assert "kind: ConfigMap" in yaml
+        assert result.value.manifests.cluster_manifests is not None
+        assert "kind: Secret" in result.value.manifests.cluster_manifests.ca_secret
+        assert "namespace: cert-manager" in result.value.manifests.cluster_manifests.ca_secret
 
 
 class TestOffboard:
@@ -707,3 +676,332 @@ class TestListK8s:
         assert "prod" in result.value.clusters
         assert len(result.value.workloads) == 1
         assert "app1" in result.value.workloads
+
+
+# =============================================================================
+# Phase 4: Scoped CA Workflow Tests
+# =============================================================================
+
+SAMPLE_CERTMGR_CA_CERT = """-----BEGIN CERTIFICATE-----
+MIIBjTCB9wIJAKHBfpEgcMFwMA0GCSqGSIb3DQEBCwUAMBUxEzARBgNVBAMMCmNl
+cnQtbWdyLWNhMB4XDTI0MDIxMTAwMDAwMFoXDTI1MDIxMTAwMDAwMFowFTETMBEG
+A1UEAwwKY2VydC1tZ3ItY2EwXDANBgkqhkiG9w0BAQEFAANLADBIAkEAu6Peh7Yl
+2Mb5yiowy70BvuV9xVGxHHWbizOYTzB1AkEArzo/MQWTZMQJ2OSSE4CAwEAAaNT
+MFEwHQYDVR0OBBYEFEKPlY0CzoSIQx6hM5HABKpvJH8fMB8GA1UdIwQYMBaAFEKP
+lY0CzoSIQx6hM5HABKpvJH8fMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEL
+BQADQQBxaVBm6CdpH5nH7n3t+nLwPfD0Cert=
+-----END CERTIFICATE-----"""
+
+SAMPLE_CERTMGR_CA_KEY = """-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIBBBBBBBipqJsrzu5ua19pGq7l2/YRP3GRI+ksp3xR3RoAoGCCqGSM49
+AwEHoUQDQgAEZ430G7tL4/GTs3JKsmcxvvZkXoq1rZ40VP9zgeOSYOlVQZnNZLdl
+IPq3pPTbbMOQ2NwlKgrosN9MzKZM5BPCertMgr==
+-----END EC PRIVATE KEY-----"""
+
+
+@pytest.fixture
+def scoped_aws_context(monkeypatch):
+    """Create an AwsContext with multiple scoped CAs on disk."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = Path(tmpdir) / "data"
+        data_dir.mkdir()
+        monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
+
+        # Default scope CA key
+        default_key_dir = data_dir / "iam-ra" / "default" / "scopes" / "default"
+        default_key_dir.mkdir(parents=True)
+        (default_key_dir / "ca-private-key.pem").write_text(SAMPLE_CA_KEY)
+
+        # cert-manager scope CA key (different key!)
+        certmgr_key_dir = data_dir / "iam-ra" / "default" / "scopes" / "cert-manager"
+        certmgr_key_dir.mkdir(parents=True)
+        (certmgr_key_dir / "ca-private-key.pem").write_text(SAMPLE_CERTMGR_CA_KEY)
+
+        with mock_aws():
+            ctx = AwsContext(region="us-east-1")
+            yield ctx
+
+
+@pytest.fixture
+def multi_scope_state(scoped_aws_context: AwsContext) -> State:
+    """Create state with multiple scoped CAs and roles in different scopes."""
+    state_module.invalidate_cache("default")
+
+    scoped_aws_context.s3.create_bucket(Bucket="test-bucket")
+
+    # Upload default scope CA cert
+    scoped_aws_context.s3.put_object(
+        Bucket="test-bucket",
+        Key="default/scopes/default/ca/certificate.pem",
+        Body=SAMPLE_CA_CERT.encode(),
+    )
+
+    # Upload cert-manager scope CA cert (different cert!)
+    scoped_aws_context.s3.put_object(
+        Bucket="test-bucket",
+        Key="default/scopes/cert-manager/ca/certificate.pem",
+        Body=SAMPLE_CERTMGR_CA_CERT.encode(),
+    )
+
+    scoped_aws_context.ssm.put_parameter(
+        Name="/iam-ra/default/state-location",
+        Value="s3://test-bucket/default/state.json",
+        Type="String",
+    )
+
+    state = State(
+        namespace="default",
+        region="us-east-1",
+        version="1.0.0",
+        init=Init(
+            stack_name="iam-ra-default-init",
+            bucket_arn=Arn("arn:aws:s3:::test-bucket"),
+            kms_key_arn=Arn("arn:aws:kms:us-east-1:123456789012:key/test-key"),
+        ),
+        cas={
+            "default": CA(
+                stack_name="iam-ra-default-ca-default",
+                mode=CAMode.SELF_SIGNED,
+                trust_anchor_arn=Arn(
+                    "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-default"
+                ),
+            ),
+            "cert-manager": CA(
+                stack_name="iam-ra-default-ca-cert-manager",
+                mode=CAMode.SELF_SIGNED,
+                trust_anchor_arn=Arn(
+                    "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-certmgr"
+                ),
+            ),
+        },
+        roles={
+            "admin": Role(
+                stack_name="iam-ra-default-role-admin",
+                role_arn=Arn("arn:aws:iam::123456789012:role/admin"),
+                profile_arn=Arn(
+                    "arn:aws:rolesanywhere:us-east-1:123456789012:profile/admin-profile"
+                ),
+                scope="default",
+            ),
+            "cert-manager": Role(
+                stack_name="iam-ra-default-role-cert-manager",
+                role_arn=Arn("arn:aws:iam::123456789012:role/cert-manager"),
+                profile_arn=Arn(
+                    "arn:aws:rolesanywhere:us-east-1:123456789012:profile/certmgr-profile"
+                ),
+                scope="cert-manager",
+            ),
+        },
+        k8s_clusters={},
+        k8s_workloads={},
+    )
+
+    scoped_aws_context.s3.put_object(
+        Bucket="test-bucket",
+        Key="default/state.json",
+        Body=state.to_json().encode(),
+    )
+
+    return state
+
+
+class TestOnboardWithScope:
+    """Tests for k8s onboard with scoped CAs."""
+
+    def test_onboard_uses_role_scope_trust_anchor(self, scoped_aws_context, multi_scope_state):
+        """Onboarding with a cert-manager role should use cert-manager's trust anchor."""
+        setup(scoped_aws_context, "default", "prod")
+        result = onboard(
+            scoped_aws_context,
+            "default",
+            "cert-manager",
+            "prod",
+            "cert-manager",
+            k8s_namespace="cert-manager",
+        )
+
+        assert isinstance(result, Ok)
+        configmap = result.value.manifests.configmap
+        # Should use cert-manager scope's trust anchor, NOT default
+        assert "ta-certmgr" in configmap
+        assert "ta-default" not in configmap
+
+    def test_onboard_uses_default_scope_trust_anchor(self, scoped_aws_context, multi_scope_state):
+        """Onboarding with a default-scope role should use default's trust anchor."""
+        setup(scoped_aws_context, "default", "prod")
+        result = onboard(
+            scoped_aws_context,
+            "default",
+            "admin-app",
+            "prod",
+            "admin",
+            k8s_namespace="default",
+        )
+
+        assert isinstance(result, Ok)
+        configmap = result.value.manifests.configmap
+        assert "ta-default" in configmap
+        assert "ta-certmgr" not in configmap
+
+    def test_onboard_generates_ca_secret_and_issuer_for_namespace(
+        self, scoped_aws_context, multi_scope_state
+    ):
+        """Onboarding should always generate CA Secret + Issuer using scope's CA."""
+        setup(scoped_aws_context, "default", "prod")
+        result = onboard(
+            scoped_aws_context,
+            "default",
+            "cert-manager",
+            "prod",
+            "cert-manager",
+            k8s_namespace="cert-manager",
+        )
+
+        assert isinstance(result, Ok)
+        manifests = result.value.manifests
+        # Should include cluster manifests (CA Secret + Issuer) for the namespace
+        assert manifests.cluster_manifests is not None
+        assert "kind: Secret" in manifests.cluster_manifests.ca_secret
+        assert "kind: Issuer" in manifests.cluster_manifests.issuer
+        # Manifests should target the workload namespace
+        assert "namespace: cert-manager" in manifests.cluster_manifests.ca_secret
+        assert "namespace: cert-manager" in manifests.cluster_manifests.issuer
+
+    def test_onboard_ca_secret_uses_scope_ca_material(self, scoped_aws_context, multi_scope_state):
+        """CA Secret should contain the scope's CA cert, not the default scope's."""
+        setup(scoped_aws_context, "default", "prod")
+        result = onboard(
+            scoped_aws_context,
+            "default",
+            "cert-manager",
+            "prod",
+            "cert-manager",
+            k8s_namespace="cert-manager",
+        )
+
+        assert isinstance(result, Ok)
+        ca_secret = result.value.manifests.cluster_manifests.ca_secret
+        # The cert-manager scope CA cert has "cert-mgr-ca" in its CN
+        assert (
+            "cert-mgr-ca" in ca_secret
+            or "CertMgr" in ca_secret
+            or SAMPLE_CERTMGR_CA_CERT.split("\n")[1][:20] in ca_secret
+        )
+
+    def test_onboard_fails_if_role_scope_has_no_ca(self, scoped_aws_context):
+        """Should fail if the role's scope doesn't have a CA set up."""
+        state_module.invalidate_cache("default")
+
+        scoped_aws_context.s3.create_bucket(Bucket="test-bucket")
+        scoped_aws_context.ssm.put_parameter(
+            Name="/iam-ra/default/state-location",
+            Value="s3://test-bucket/default/state.json",
+            Type="String",
+        )
+
+        # State with a role whose scope has no CA
+        state = State(
+            namespace="default",
+            region="us-east-1",
+            version="1.0.0",
+            init=Init(
+                stack_name="iam-ra-default-init",
+                bucket_arn=Arn("arn:aws:s3:::test-bucket"),
+                kms_key_arn=Arn("arn:aws:kms:us-east-1:123456789012:key/test-key"),
+            ),
+            cas={
+                "default": CA(
+                    stack_name="iam-ra-default-ca-default",
+                    mode=CAMode.SELF_SIGNED,
+                    trust_anchor_arn=Arn(
+                        "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-default"
+                    ),
+                ),
+                # No "longhorn-system" CA!
+            },
+            roles={
+                "longhorn-backup": Role(
+                    stack_name="iam-ra-default-role-longhorn-backup",
+                    role_arn=Arn("arn:aws:iam::123456789012:role/longhorn-backup"),
+                    profile_arn=Arn(
+                        "arn:aws:rolesanywhere:us-east-1:123456789012:profile/longhorn-profile"
+                    ),
+                    scope="longhorn-system",  # scope exists on role but no CA
+                ),
+            },
+            k8s_clusters={"prod": K8sCluster(name="prod")},
+            k8s_workloads={},
+        )
+
+        scoped_aws_context.s3.put_object(
+            Bucket="test-bucket",
+            Key="default/state.json",
+            Body=state.to_json().encode(),
+        )
+
+        result = onboard(
+            scoped_aws_context,
+            "default",
+            "longhorn-backup",
+            "prod",
+            "longhorn-backup",
+            k8s_namespace="longhorn-system",
+        )
+
+        assert isinstance(result, Err)
+        assert isinstance(result.error, CAScopeNotFoundError)
+        assert result.error.scope == "longhorn-system"
+
+
+class TestSetupSimplified:
+    """Tests for simplified k8s setup (just registers cluster)."""
+
+    def test_setup_works_without_ca_key_on_disk(self, monkeypatch):
+        """Setup should work without needing CA key on disk (no manifests generated)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            data_dir.mkdir()
+            monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
+            # Deliberately NOT creating any CA key files
+
+            with mock_aws():
+                ctx = AwsContext(region="us-east-1")
+
+                state_module.invalidate_cache("default")
+                ctx.s3.create_bucket(Bucket="test-bucket")
+                ctx.ssm.put_parameter(
+                    Name="/iam-ra/default/state-location",
+                    Value="s3://test-bucket/default/state.json",
+                    Type="String",
+                )
+
+                state = State(
+                    namespace="default",
+                    region="us-east-1",
+                    version="1.0.0",
+                    init=Init(
+                        stack_name="iam-ra-default-init",
+                        bucket_arn=Arn("arn:aws:s3:::test-bucket"),
+                        kms_key_arn=Arn("arn:aws:kms:us-east-1:123456789012:key/test-key"),
+                    ),
+                    cas={
+                        "default": CA(
+                            stack_name="iam-ra-default-ca",
+                            mode=CAMode.SELF_SIGNED,
+                            trust_anchor_arn=Arn(
+                                "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-123"
+                            ),
+                        ),
+                    },
+                )
+
+                ctx.s3.put_object(
+                    Bucket="test-bucket",
+                    Key="default/state.json",
+                    Body=state.to_json().encode(),
+                )
+
+                result = setup(ctx, "default", "new-cluster")
+
+                assert isinstance(result, Ok)
+                assert result.value.cluster.name == "new-cluster"

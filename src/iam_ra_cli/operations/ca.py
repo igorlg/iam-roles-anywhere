@@ -1,4 +1,13 @@
-"""CA operations - Certificate Authority stack deployment."""
+"""CA operations - Certificate Authority stack deployment.
+
+Supports scoped CAs: each scope gets its own CA, Trust Anchor,
+S3 path, local key path, and CloudFormation stack.
+
+Path scheme:
+  S3:    {namespace}/scopes/{scope}/ca/certificate.pem
+  Local: {data_dir}/{namespace}/scopes/{scope}/ca-private-key.pem
+  CFN:   iam-ra-{namespace}-ca-{scope}
+"""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +30,8 @@ ROOTCA_PCA_NEW_TEMPLATE = "rootca-pca-new.yaml"
 ROOTCA_PCA_EXISTING_TEMPLATE = "rootca-pca-existing.yaml"
 
 
-def _stack_name(namespace: str) -> str:
-    return f"iam-ra-{namespace}-rootca"
+def _stack_name(namespace: str, scope: str) -> str:
+    return f"iam-ra-{namespace}-ca-{scope}"
 
 
 def _load_template(name: str) -> str:
@@ -30,12 +39,12 @@ def _load_template(name: str) -> str:
     return path.read_text()
 
 
-def _ca_cert_s3_key(namespace: str) -> str:
-    return f"{namespace}/ca/certificate.pem"
+def _ca_cert_s3_key(namespace: str, scope: str) -> str:
+    return f"{namespace}/scopes/{scope}/ca/certificate.pem"
 
 
-def _ca_key_local_path(namespace: str) -> Path:
-    return paths.data_dir() / namespace / "ca-private-key.pem"
+def _ca_key_local_path(namespace: str, scope: str) -> Path:
+    return paths.data_dir() / namespace / "scopes" / scope / "ca-private-key.pem"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +70,7 @@ def create_self_signed_ca(
     ctx: AwsContext,
     namespace: str,
     bucket_name: str,
+    scope: str = "default",
     validity_years: int = 10,
 ) -> Result[SelfSignedCAResult, CAError]:
     """Create a self-signed CA and deploy the rootca stack.
@@ -70,13 +80,13 @@ def create_self_signed_ca(
     3. Save CA private key locally (for future host cert generation)
     4. Deploy rootca-self-signed.yaml stack
     """
-    stack_name = _stack_name(namespace)
-    cert_s3_key = _ca_cert_s3_key(namespace)
-    local_key_path = _ca_key_local_path(namespace)
+    stack_name = _stack_name(namespace, scope)
+    cert_s3_key = _ca_cert_s3_key(namespace, scope)
+    local_key_path = _ca_key_local_path(namespace, scope)
 
     # Generate CA certificate and key
     ca_keypair = crypto.generate_ca(
-        common_name=f"IAM Roles Anywhere CA ({namespace})",
+        common_name=f"IAM Roles Anywhere CA ({namespace}/{scope})",
         validity_years=validity_years,
     )
 
@@ -100,9 +110,13 @@ def create_self_signed_ca(
         template_body=template,
         parameters={
             "Namespace": namespace,
+            "Scope": scope,
             "CACertificateS3Key": cert_s3_key,
         },
-        tags={"iam-ra:namespace": namespace},
+        tags={
+            "iam-ra:namespace": namespace,
+            "iam-ra:scope": scope,
+        },
     ):
         case Err() as e:
             return e
@@ -120,11 +134,12 @@ def create_self_signed_ca(
 def create_pca_ca(
     ctx: AwsContext,
     namespace: str,
+    scope: str = "default",
     key_algorithm: str = "EC_prime256v1",
     validity_years: int = 10,
 ) -> Result[PCAResult, StackDeployError]:
     """Create a new ACM PCA and deploy the rootca stack."""
-    stack_name = _stack_name(namespace)
+    stack_name = _stack_name(namespace, scope)
     template = _load_template(ROOTCA_PCA_NEW_TEMPLATE)
 
     match deploy_stack(
@@ -133,10 +148,14 @@ def create_pca_ca(
         template_body=template,
         parameters={
             "Namespace": namespace,
+            "Scope": scope,
             "KeyAlgorithm": key_algorithm,
             "ValidityYears": str(validity_years),
         },
-        tags={"iam-ra:namespace": namespace},
+        tags={
+            "iam-ra:namespace": namespace,
+            "iam-ra:scope": scope,
+        },
     ):
         case Err() as e:
             return e
@@ -154,9 +173,10 @@ def attach_existing_pca(
     ctx: AwsContext,
     namespace: str,
     pca_arn: str,
+    scope: str = "default",
 ) -> Result[PCAResult, StackDeployError]:
     """Attach an existing ACM PCA and deploy the rootca stack."""
-    stack_name = _stack_name(namespace)
+    stack_name = _stack_name(namespace, scope)
     template = _load_template(ROOTCA_PCA_EXISTING_TEMPLATE)
 
     match deploy_stack(
@@ -165,9 +185,13 @@ def attach_existing_pca(
         template_body=template,
         parameters={
             "Namespace": namespace,
+            "Scope": scope,
             "PCAArn": pca_arn,
         },
-        tags={"iam-ra:namespace": namespace},
+        tags={
+            "iam-ra:namespace": namespace,
+            "iam-ra:scope": scope,
+        },
     ):
         case Err() as e:
             return e

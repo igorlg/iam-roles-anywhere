@@ -52,9 +52,9 @@ def destroy(ctx: AwsContext, namespace: str) -> Result[None, DestroyError]:
             case Ok(_):
                 pass
 
-    # Step 3: Delete CA stack
-    if state.ca:
-        match delete_ca(ctx, state.ca.stack_name):
+    # Step 3: Delete all CA stacks (all scopes)
+    for scope_name, ca in state.cas.items():
+        match delete_ca(ctx, ca.stack_name):
             case Err(e):
                 return Err(e)
             case Ok(_):

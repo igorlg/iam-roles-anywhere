@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from iam_ra_cli.models import CA, Arn, CAMode, Host, Init, Role, State
+from iam_ra_cli.models import CA, Arn, CAMode, Host, Init, K8sCluster, K8sWorkload, Role, State
 
 
 class TestArn:
@@ -179,9 +179,17 @@ class TestState:
         assert state.roles == {}
         assert state.hosts == {}
 
-    def test_state_initialized_requires_both_init_and_ca(self) -> None:
-        # Only init
+    def test_state_initialized_requires_init(self) -> None:
+        # No init → not initialized
         state = State(
+            namespace="test",
+            region="ap-southeast-2",
+            version="0.1.0",
+        )
+        assert state.is_initialized is False
+
+        # With init → initialized (CAs are per-scope, not required for init)
+        state2 = State(
             namespace="test",
             region="ap-southeast-2",
             version="0.1.0",
@@ -191,22 +199,7 @@ class TestState:
                 kms_key_arn=Arn("arn:aws:kms:ap-southeast-2:123456789012:key/key"),
             ),
         )
-        assert state.is_initialized is False
-
-        # Only CA
-        state2 = State(
-            namespace="test",
-            region="ap-southeast-2",
-            version="0.1.0",
-            ca=CA(
-                stack_name="ca",
-                mode=CAMode.SELF_SIGNED,
-                trust_anchor_arn=Arn(
-                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta"
-                ),
-            ),
-        )
-        assert state2.is_initialized is False
+        assert state2.is_initialized is True
 
     def test_state_fully_initialized(self) -> None:
         state = State(
@@ -218,13 +211,15 @@ class TestState:
                 bucket_arn=Arn("arn:aws:s3:::bucket"),
                 kms_key_arn=Arn("arn:aws:kms:ap-southeast-2:123456789012:key/key"),
             ),
-            ca=CA(
-                stack_name="ca",
-                mode=CAMode.SELF_SIGNED,
-                trust_anchor_arn=Arn(
-                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta"
+            cas={
+                "default": CA(
+                    stack_name="ca",
+                    mode=CAMode.SELF_SIGNED,
+                    trust_anchor_arn=Arn(
+                        "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta"
+                    ),
                 ),
-            ),
+            },
         )
         assert state.is_initialized is True
 
@@ -238,13 +233,15 @@ class TestState:
                 bucket_arn=Arn("arn:aws:s3:::test-bucket"),
                 kms_key_arn=Arn("arn:aws:kms:ap-southeast-2:123456789012:key/test-key"),
             ),
-            ca=CA(
-                stack_name="iam-ra-test-rootca",
-                mode=CAMode.SELF_SIGNED,
-                trust_anchor_arn=Arn(
-                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-123"
+            cas={
+                "default": CA(
+                    stack_name="iam-ra-test-rootca",
+                    mode=CAMode.SELF_SIGNED,
+                    trust_anchor_arn=Arn(
+                        "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-123"
+                    ),
                 ),
-            ),
+            },
             roles={
                 "admin": Role(
                     stack_name="iam-ra-test-role-admin",
@@ -284,8 +281,8 @@ class TestState:
         assert restored.init.stack_name == original.init.stack_name
         assert isinstance(restored.init.bucket_arn, Arn)
 
-        assert restored.ca is not None
-        assert restored.ca.mode == CAMode.SELF_SIGNED
+        assert "default" in restored.cas
+        assert restored.cas["default"].mode == CAMode.SELF_SIGNED
 
         assert "admin" in restored.roles
         assert isinstance(restored.roles["admin"].role_arn, Arn)
@@ -304,4 +301,264 @@ class TestState:
         assert data["namespace"] == "test"
         assert data["region"] == "us-east-1"
         assert data["init"] is None
-        assert data["ca"] is None
+        assert data["cas"] == {}
+
+
+class TestRoleScope:
+    """Tests for Role.scope field."""
+
+    def test_role_default_scope(self) -> None:
+        role = Role(
+            stack_name="test",
+            role_arn=Arn("arn:aws:iam::123456789012:role/test"),
+            profile_arn=Arn("arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/test"),
+        )
+        assert role.scope == "default"
+
+    def test_role_custom_scope(self) -> None:
+        role = Role(
+            stack_name="test",
+            role_arn=Arn("arn:aws:iam::123456789012:role/test"),
+            profile_arn=Arn("arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/test"),
+            scope="cert-manager",
+        )
+        assert role.scope == "cert-manager"
+
+    def test_role_scope_survives_json_roundtrip(self) -> None:
+        state = State(
+            namespace="test",
+            region="us-east-1",
+            version="2.0.0",
+            init=Init(
+                stack_name="init",
+                bucket_arn=Arn("arn:aws:s3:::bucket"),
+                kms_key_arn=Arn("arn:aws:kms:us-east-1:123456789012:key/key"),
+            ),
+            roles={
+                "cert-manager": Role(
+                    stack_name="iam-ra-test-role-cert-manager",
+                    role_arn=Arn("arn:aws:iam::123456789012:role/cert-manager"),
+                    profile_arn=Arn("arn:aws:rolesanywhere:us-east-1:123456789012:profile/p-456"),
+                    scope="cert-manager",
+                ),
+            },
+        )
+        restored = State.from_json(state.to_json())
+        assert restored.roles["cert-manager"].scope == "cert-manager"
+
+
+class TestScopedCAs:
+    """Tests for State.cas (scoped CA dict)."""
+
+    SAMPLE_CA = CA(
+        stack_name="iam-ra-test-ca-default",
+        mode=CAMode.SELF_SIGNED,
+        trust_anchor_arn=Arn(
+            "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-default"
+        ),
+    )
+
+    SAMPLE_CA_SCOPED = CA(
+        stack_name="iam-ra-test-ca-cert-manager",
+        mode=CAMode.SELF_SIGNED,
+        trust_anchor_arn=Arn(
+            "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-cm"
+        ),
+    )
+
+    def test_state_empty_cas(self) -> None:
+        state = State(namespace="test", region="us-east-1", version="2.0.0")
+        assert state.cas == {}
+
+    def test_state_with_scoped_cas(self) -> None:
+        state = State(
+            namespace="test",
+            region="us-east-1",
+            version="2.0.0",
+            cas={
+                "default": self.SAMPLE_CA,
+                "cert-manager": self.SAMPLE_CA_SCOPED,
+            },
+        )
+        assert len(state.cas) == 2
+        assert state.cas["default"].trust_anchor_arn.resource_id == "ta-default"
+        assert state.cas["cert-manager"].trust_anchor_arn.resource_id == "ta-cm"
+
+    def test_is_initialized_with_init_only(self) -> None:
+        """is_initialized should be True when init exists (CAs are per-scope now)."""
+        state = State(
+            namespace="test",
+            region="us-east-1",
+            version="2.0.0",
+            init=Init(
+                stack_name="init",
+                bucket_arn=Arn("arn:aws:s3:::bucket"),
+                kms_key_arn=Arn("arn:aws:kms:us-east-1:123456789012:key/key"),
+            ),
+        )
+        assert state.is_initialized is True
+
+    def test_is_initialized_without_init(self) -> None:
+        state = State(namespace="test", region="us-east-1", version="2.0.0")
+        assert state.is_initialized is False
+
+    def test_cas_json_roundtrip(self) -> None:
+        original = State(
+            namespace="test",
+            region="us-east-1",
+            version="2.0.0",
+            init=Init(
+                stack_name="init",
+                bucket_arn=Arn("arn:aws:s3:::bucket"),
+                kms_key_arn=Arn("arn:aws:kms:us-east-1:123456789012:key/key"),
+            ),
+            cas={
+                "default": self.SAMPLE_CA,
+                "cert-manager": self.SAMPLE_CA_SCOPED,
+            },
+        )
+        restored = State.from_json(original.to_json())
+
+        assert len(restored.cas) == 2
+        assert restored.cas["default"].mode == CAMode.SELF_SIGNED
+        assert isinstance(restored.cas["cert-manager"].trust_anchor_arn, Arn)
+
+    def test_cas_json_format(self) -> None:
+        """Serialized JSON should use 'cas' key, not 'ca'."""
+        state = State(
+            namespace="test",
+            region="us-east-1",
+            version="2.0.0",
+            cas={"default": self.SAMPLE_CA},
+        )
+        data = json.loads(state.to_json())
+        assert "cas" in data
+        assert "ca" not in data
+
+
+class TestV1StateMigration:
+    """Tests for backward-compatible deserialization of v1 state."""
+
+    def test_v1_state_with_ca_migrates_to_cas(self) -> None:
+        """v1 JSON with 'ca' field should deserialize into cas['default']."""
+        v1_json = json.dumps(
+            {
+                "namespace": "default",
+                "region": "us-east-1",
+                "version": "1.0.0",
+                "init": {
+                    "stack_name": "iam-ra-default-init",
+                    "bucket_arn": "arn:aws:s3:::test-bucket",
+                    "kms_key_arn": "arn:aws:kms:us-east-1:123456789012:key/key",
+                },
+                "ca": {
+                    "stack_name": "iam-ra-default-rootca",
+                    "mode": "self-signed",
+                    "trust_anchor_arn": "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-123",
+                },
+                "roles": {},
+                "hosts": {},
+                "k8s_clusters": {},
+                "k8s_workloads": {},
+            }
+        )
+        state = State.from_json(v1_json)
+
+        assert "default" in state.cas
+        assert state.cas["default"].stack_name == "iam-ra-default-rootca"
+        assert state.cas["default"].mode == CAMode.SELF_SIGNED
+        assert state.cas["default"].trust_anchor_arn.resource_id == "ta-123"
+
+    def test_v1_state_without_ca_has_empty_cas(self) -> None:
+        """v1 JSON without 'ca' field should have empty cas dict."""
+        v1_json = json.dumps(
+            {
+                "namespace": "default",
+                "region": "us-east-1",
+                "version": "1.0.0",
+                "init": None,
+                "ca": None,
+                "roles": {},
+                "hosts": {},
+            }
+        )
+        state = State.from_json(v1_json)
+        assert state.cas == {}
+
+    def test_v1_role_without_scope_gets_default(self) -> None:
+        """v1 Role without scope field should get scope='default'."""
+        v1_json = json.dumps(
+            {
+                "namespace": "default",
+                "region": "us-east-1",
+                "version": "1.0.0",
+                "init": None,
+                "ca": None,
+                "roles": {
+                    "admin": {
+                        "stack_name": "iam-ra-default-role-admin",
+                        "role_arn": "arn:aws:iam::123456789012:role/admin",
+                        "profile_arn": "arn:aws:rolesanywhere:us-east-1:123456789012:profile/p",
+                        "policies": [],
+                    }
+                },
+                "hosts": {},
+            }
+        )
+        state = State.from_json(v1_json)
+        assert state.roles["admin"].scope == "default"
+
+    def test_v2_state_with_cas_loads_directly(self) -> None:
+        """v2 JSON with 'cas' field should load without migration."""
+        v2_json = json.dumps(
+            {
+                "namespace": "default",
+                "region": "us-east-1",
+                "version": "2.0.0",
+                "init": None,
+                "cas": {
+                    "default": {
+                        "stack_name": "iam-ra-default-rootca",
+                        "mode": "self-signed",
+                        "trust_anchor_arn": "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta",
+                    },
+                    "cert-manager": {
+                        "stack_name": "iam-ra-default-ca-cert-manager",
+                        "mode": "self-signed",
+                        "trust_anchor_arn": "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-cm",
+                    },
+                },
+                "roles": {},
+                "hosts": {},
+            }
+        )
+        state = State.from_json(v2_json)
+        assert len(state.cas) == 2
+        assert state.cas["cert-manager"].trust_anchor_arn.resource_id == "ta-cm"
+
+
+class TestK8sClusterV2:
+    """Tests for K8sCluster model (v2 - no k8s_namespace field)."""
+
+    def test_cluster_creation(self) -> None:
+        cluster = K8sCluster(name="prod")
+        assert cluster.name == "prod"
+
+    def test_cluster_is_frozen(self) -> None:
+        cluster = K8sCluster(name="prod")
+        with pytest.raises(AttributeError):
+            cluster.name = "staging"
+
+
+class TestK8sWorkloadV2:
+    """Tests for K8sWorkload model (v2 - scope derived from role)."""
+
+    def test_workload_creation(self) -> None:
+        workload = K8sWorkload(
+            name="my-app",
+            cluster_name="prod",
+            role_name="admin",
+            namespace="cert-manager",
+        )
+        assert workload.name == "my-app"
+        assert workload.namespace == "cert-manager"

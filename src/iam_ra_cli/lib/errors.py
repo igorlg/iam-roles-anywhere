@@ -57,6 +57,22 @@ class CACertNotFoundError:
     key: str
 
 
+@dataclass(frozen=True, slots=True)
+class CAScopeNotFoundError:
+    """CA scope does not exist."""
+
+    namespace: str
+    scope: str
+
+
+@dataclass(frozen=True, slots=True)
+class CAScopeAlreadyExistsError:
+    """CA scope already exists."""
+
+    namespace: str
+    scope: str
+
+
 # =============================================================================
 # Role Errors
 # =============================================================================

@@ -10,6 +10,8 @@ from pathlib import Path
 
 from iam_ra_cli.commands.common import _format_error
 from iam_ra_cli.lib.errors import (
+    CAScopeAlreadyExistsError,
+    CAScopeNotFoundError,
     HostAlreadyExistsError,
     HostNotFoundError,
     K8sClusterAlreadyExistsError,
@@ -152,6 +154,24 @@ class TestFormatK8sErrors:
         result = _format_error(error)
         assert "acm-pca" in result
         assert "not supported" in result
+
+
+class TestFormatCAErrors:
+    """Tests for CA scope error formatting."""
+
+    def test_ca_scope_not_found(self) -> None:
+        error = CAScopeNotFoundError(namespace="default", scope="cert-manager")
+        result = _format_error(error)
+        assert "cert-manager" in result
+        assert "default" in result
+        assert "not found" in result
+
+    def test_ca_scope_already_exists(self) -> None:
+        error = CAScopeAlreadyExistsError(namespace="default", scope="cert-manager")
+        result = _format_error(error)
+        assert "cert-manager" in result
+        assert "default" in result
+        assert "already exists" in result
 
 
 class TestFormatStateErrors:

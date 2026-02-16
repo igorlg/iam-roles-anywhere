@@ -3,6 +3,7 @@
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    CAScopeNotFoundError,
     NotInitializedError,
     RoleInUseError,
     RoleNotFoundError,
@@ -16,7 +17,9 @@ from iam_ra_cli.models import Role
 from iam_ra_cli.operations.role import create_role as create_role_op
 from iam_ra_cli.operations.role import delete_role as delete_role_op
 
-type CreateRoleError = NotInitializedError | StackDeployError | StateSaveError | StateLoadError
+type CreateRoleError = (
+    NotInitializedError | CAScopeNotFoundError | StackDeployError | StateSaveError | StateLoadError
+)
 type DeleteRoleError = (
     NotInitializedError
     | RoleNotFoundError
@@ -34,6 +37,8 @@ def create_role(
     name: str,
     policies: list[str] | None = None,
     session_duration: int = 3600,
+    *,
+    scope: str = "default",
 ) -> Result[Role, CreateRoleError]:
     """Create or update an IAM role with Roles Anywhere profile.
 
@@ -42,8 +47,9 @@ def create_role(
     the diff -- same config is a no-op, different policies triggers an update.
 
     1. Load state, validate initialized
-    2. Deploy role stack (create or update)
-    3. Update state
+    2. Validate scope exists (has a CA set up)
+    3. Deploy role stack with scope's Trust Anchor ARN
+    4. Update state with scope
     """
     # Load state
     match state_module.load(ctx.ssm, ctx.s3, namespace):
@@ -57,8 +63,22 @@ def create_role(
     if not state.is_initialized:
         return Err(NotInitializedError(namespace))
 
+    # Validate scope exists
+    if scope not in state.cas:
+        return Err(CAScopeNotFoundError(namespace, scope))
+
+    trust_anchor_arn = str(state.cas[scope].trust_anchor_arn)
+
     # Deploy role stack (CFN handles create vs update)
-    match create_role_op(ctx, namespace, name, policies, session_duration):
+    match create_role_op(
+        ctx,
+        namespace,
+        name,
+        policies,
+        session_duration,
+        trust_anchor_arn=trust_anchor_arn,
+        scope=scope,
+    ):
         case Err() as e:
             return e
         case Ok(role_result):
@@ -70,6 +90,7 @@ def create_role(
         role_arn=role_result.role_arn,
         profile_arn=role_result.profile_arn,
         policies=role_result.policies,
+        scope=scope,
     )
 
     # Update state (always -- policies may have changed)

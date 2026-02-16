@@ -37,6 +37,9 @@ def create_role(
     name: str,
     policies: list[str] | None = None,
     session_duration: int = 3600,
+    *,
+    trust_anchor_arn: str,
+    scope: str = "default",
 ) -> Result[RoleResult, StackDeployError]:
     """Create an IAM role with Roles Anywhere profile.
 
@@ -46,6 +49,8 @@ def create_role(
         name: Role name
         policies: List of managed policy ARNs to attach
         session_duration: Session duration in seconds (900-43200)
+        trust_anchor_arn: Trust Anchor ARN for the role's scope
+        scope: CA scope this role belongs to
     """
     stack_name = _stack_name(namespace, name)
     template = _load_template(ROLE_TEMPLATE)
@@ -53,6 +58,7 @@ def create_role(
     params: dict[str, str] = {
         "Namespace": namespace,
         "RoleName": name,
+        "TrustAnchorArn": trust_anchor_arn,
         "SessionDuration": str(session_duration),
     }
     if policies:
@@ -63,7 +69,11 @@ def create_role(
         stack_name=stack_name,
         template_body=template,
         parameters=params,
-        tags={"iam-ra:namespace": namespace, "iam-ra:role": name},
+        tags={
+            "iam-ra:namespace": namespace,
+            "iam-ra:role": name,
+            "iam-ra:scope": scope,
+        },
         capabilities=["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"],
     ):
         case Err() as e:

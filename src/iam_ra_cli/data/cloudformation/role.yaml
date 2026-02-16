@@ -15,6 +15,10 @@ Parameters:
     Default: ""
     Description: Optional managed policy ARNs to attach
 
+  TrustAnchorArn:
+    Type: String
+    Description: ARN of the IAM Roles Anywhere Trust Anchor for this role's scope
+
   SessionDuration:
     Type: Number
     Default: 3600
@@ -56,7 +60,7 @@ Resources:
               - sts:SetSourceIdentity
             Condition:
               ArnEquals:
-                aws:SourceArn: !Sub "{{resolve:ssm:/iam-ra/${Namespace}/trust-anchor-arn}}"
+                aws:SourceArn: !Ref TrustAnchorArn
       ManagedPolicyArns: !If
         - HasPolicies
         - !Ref PolicyArns

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Self
 
 
@@ -59,7 +59,7 @@ class Arn(str):
         return res
 
 
-class CAMode(str, Enum):
+class CAMode(StrEnum):
     """Certificate Authority mode."""
 
     SELF_SIGNED = "self-signed"
@@ -88,12 +88,18 @@ class CA:
 
 @dataclass(frozen=True)
 class Role:
-    """IAM Role with Roles Anywhere profile."""
+    """IAM Role with Roles Anywhere profile.
+
+    The scope field determines which CA/Trust Anchor this role
+    is associated with. Certs signed by a scope's CA can only
+    assume roles within that same scope.
+    """
 
     stack_name: str
     role_arn: Arn
     profile_arn: Arn
     policies: tuple[Arn, ...] = ()
+    scope: str = "default"
 
 
 @dataclass(frozen=True)
@@ -111,12 +117,11 @@ class Host:
 class K8sCluster:
     """Kubernetes cluster configured for IAM Roles Anywhere.
 
-    Represents a K8s cluster where cert-manager Issuer and CA Secret
-    have been set up. Multiple workloads can reference the same cluster.
+    Represents a K8s cluster where workloads can be onboarded.
+    Per-namespace CA setup is handled by scopes, not by the cluster.
     """
 
     name: str
-    k8s_namespace: str = "default"
 
 
 @dataclass(frozen=True)
@@ -135,13 +140,17 @@ class K8sWorkload:
 
 @dataclass
 class State:
-    """Complete IAM Roles Anywhere state for a namespace."""
+    """Complete IAM Roles Anywhere state for a namespace.
+
+    v2: CAs are per-scope (cas dict) instead of a single global CA.
+    Roles belong to a scope via their scope field.
+    """
 
     namespace: str
     region: str
     version: str
     init: Init | None = None
-    ca: CA | None = None
+    cas: dict[str, CA] = field(default_factory=dict)
     roles: dict[str, Role] = field(default_factory=dict)
     hosts: dict[str, Host] = field(default_factory=dict)
     k8s_clusters: dict[str, K8sCluster] = field(default_factory=dict)
@@ -149,14 +158,27 @@ class State:
 
     @property
     def is_initialized(self) -> bool:
-        return self.init is not None and self.ca is not None
+        return self.init is not None
+
+    @property
+    def ca(self) -> CA | None:
+        """Backward-compat: return the default scope CA, or None."""
+        return self.cas.get("default")
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
 
     @classmethod
     def from_json(cls, data: str) -> Self:
-        return _from_dict(cls, json.loads(data))
+        raw = json.loads(data)
+        # v1 → v2 migration: convert single 'ca' to 'cas["default"]'
+        if "ca" in raw and "cas" not in raw:
+            ca_val = raw.pop("ca")
+            raw["cas"] = {"default": ca_val} if ca_val is not None else {}
+        elif "ca" in raw:
+            # v2 state that somehow has both -- ignore legacy 'ca'
+            raw.pop("ca")
+        return _from_dict(cls, raw)
 
 
 def _from_dict(cls: type, data: Any) -> Any:

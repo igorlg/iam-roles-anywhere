@@ -34,6 +34,8 @@ check:
 # Run Python tests
 test:
     uv run pytest tests/ -v
+    uv run mypy src/iam_ra_cli
+    uv run ruff check src/iam_ra_cli
 
 # Run Python tests with coverage
 test-cov:

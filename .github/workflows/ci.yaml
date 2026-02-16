@@ -1,6 +1,7 @@
-# CI - Run tests on all branch commits (except main)
+# CI - Nix flake checks and builds
 #
-# Runs nix flake check on supported Linux platforms.
+# Runs on every push to feature branches for fast feedback.
+# PRs only add PR-specific checks (version label) via release.yaml.
 # Darwin is excluded due to lack of GitHub-hosted macOS runners with Nix.
 
 name: CI
@@ -8,9 +9,6 @@ name: CI
 on:
   push:
     branches-ignore:
-      - main
-  pull_request:
-    branches:
       - main
 
 concurrency:

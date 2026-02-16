@@ -6,6 +6,7 @@ from pathlib import Path
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    CAScopeNotFoundError,
     HostAlreadyExistsError,
     HostNotFoundError,
     NotInitializedError,
@@ -30,6 +31,7 @@ from iam_ra_cli.operations.secrets import SecretsFileResult, create_secrets_file
 type OnboardError = (
     NotInitializedError
     | RoleNotFoundError
+    | CAScopeNotFoundError
     | HostAlreadyExistsError
     | HostError
     | SecretsError
@@ -87,13 +89,19 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
         return Err(NotInitializedError(config.namespace))
 
     assert state.init is not None
-    assert state.ca is not None
 
     # Validate role exists
     if config.role_name not in state.roles:
         return Err(RoleNotFoundError(config.namespace, config.role_name))
 
     role = state.roles[config.role_name]
+    scope = role.scope
+
+    # Validate scope has a CA set up
+    if scope not in state.cas:
+        return Err(CAScopeNotFoundError(config.namespace, scope))
+
+    scope_ca = state.cas[scope]
 
     # Check host doesn't already exist
     if config.hostname in state.hosts and not config.overwrite:
@@ -102,7 +110,7 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
     bucket_name = state.init.bucket_arn.resource_id
 
     # Generate cert and deploy host stack based on CA mode
-    match state.ca.mode:
+    match scope_ca.mode:
         case CAMode.SELF_SIGNED:
             match onboard_host_self_signed(
                 ctx,
@@ -110,6 +118,7 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
                 config.hostname,
                 bucket_name,
                 config.validity_days,
+                scope=scope,
             ):
                 case Err() as e:
                     return e
@@ -117,12 +126,12 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
                     pass
 
         case CAMode.PCA_NEW | CAMode.PCA_EXISTING:
-            assert state.ca.pca_arn is not None
+            assert scope_ca.pca_arn is not None
             match onboard_host_pca(
                 ctx,
                 config.namespace,
                 config.hostname,
-                str(state.ca.pca_arn),
+                str(scope_ca.pca_arn),
                 bucket_name,
                 config.validity_days,
             ):
@@ -156,7 +165,7 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
             hostname=config.hostname,
             certificate_secret_arn=str(host_result.certificate_secret_arn),
             private_key_secret_arn=str(host_result.private_key_secret_arn),
-            trust_anchor_arn=str(state.ca.trust_anchor_arn),
+            trust_anchor_arn=str(scope_ca.trust_anchor_arn),
             profile_arn=str(role.profile_arn),
             role_arn=str(role.role_arn),
             output_path=config.sops_output_path,

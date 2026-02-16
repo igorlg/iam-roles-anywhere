@@ -1,9 +1,8 @@
 """Host operations - host certificate and stack deployment."""
 
 from dataclasses import dataclass
-from pathlib import Path
 
-from iam_ra_cli.lib import crypto, paths
+from iam_ra_cli.lib import crypto
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.cfn import delete_stack, deploy_stack
 from iam_ra_cli.lib.errors import (
@@ -17,6 +16,7 @@ from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.lib.storage.s3 import delete_object, read_object, write_object
 from iam_ra_cli.lib.templates import get_template_path
 from iam_ra_cli.models import Arn
+from iam_ra_cli.operations.ca import _ca_cert_s3_key, _ca_key_local_path
 
 HOST_TEMPLATE = "host.yaml"
 
@@ -38,14 +38,6 @@ def _key_s3_key(namespace: str, hostname: str) -> str:
     return f"{namespace}/hosts/{hostname}/private-key.pem"
 
 
-def _ca_cert_s3_key(namespace: str) -> str:
-    return f"{namespace}/ca/certificate.pem"
-
-
-def _ca_key_local_path(namespace: str) -> Path:
-    return paths.data_dir() / namespace / "ca-private-key.pem"
-
-
 @dataclass(frozen=True, slots=True)
 class HostResult:
     """Result of onboarding a host."""
@@ -62,11 +54,12 @@ def onboard_host_self_signed(
     hostname: str,
     bucket_name: str,
     validity_days: int = 365,
+    scope: str = "default",
 ) -> Result[HostResult, HostError]:
     """Onboard a host using self-signed CA.
 
-    1. Load CA certificate from S3
-    2. Load CA private key from local storage
+    1. Load CA certificate from S3 (scoped path)
+    2. Load CA private key from local storage (scoped path)
     3. Generate host certificate
     4. Upload host cert/key to S3
     5. Deploy host stack (creates Secrets Manager secrets)
@@ -74,8 +67,8 @@ def onboard_host_self_signed(
     stack_name = _stack_name(namespace, hostname)
     cert_s3_key = _cert_s3_key(namespace, hostname)
     key_s3_key = _key_s3_key(namespace, hostname)
-    ca_cert_key = _ca_cert_s3_key(namespace)
-    ca_key_path = _ca_key_local_path(namespace)
+    ca_cert_key = _ca_cert_s3_key(namespace, scope)
+    ca_key_path = _ca_key_local_path(namespace, scope)
 
     # Load CA certificate from S3
     match read_object(ctx.s3, bucket_name, ca_cert_key):

@@ -66,13 +66,15 @@ def sample_state() -> State:
             bucket_arn=Arn("arn:aws:s3:::test-bucket"),
             kms_key_arn=Arn("arn:aws:kms:ap-southeast-2:123456789012:key/test-key"),
         ),
-        ca=CA(
-            stack_name="iam-ra-test-rootca",
-            mode=CAMode.SELF_SIGNED,
-            trust_anchor_arn=Arn(
-                "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/test-anchor"
+        cas={
+            "default": CA(
+                stack_name="iam-ra-test-rootca",
+                mode=CAMode.SELF_SIGNED,
+                trust_anchor_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/test-anchor"
+                ),
             ),
-        ),
+        },
         roles={
             "admin": Role(
                 stack_name="iam-ra-test-role-admin",
@@ -111,7 +113,7 @@ class TestStateSerialization:
         assert data["namespace"] == "test"
         assert data["region"] == "ap-southeast-2"
         assert data["init"]["stack_name"] == "iam-ra-test-init"
-        assert data["ca"]["mode"] == "self-signed"
+        assert data["cas"]["default"]["mode"] == "self-signed"
         assert "admin" in data["roles"]
         assert "web1" in data["hosts"]
 

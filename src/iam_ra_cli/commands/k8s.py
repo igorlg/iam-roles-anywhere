@@ -1,5 +1,7 @@
 """Kubernetes commands - manage K8s clusters and workloads for Roles Anywhere."""
 
+import sys
+
 import click
 
 from iam_ra_cli.commands.common import (
@@ -12,6 +14,7 @@ from iam_ra_cli.commands.common import (
     namespace_option,
     to_json,
 )
+from iam_ra_cli.lib.result import Ok
 from iam_ra_cli.workflows import k8s as k8s_workflow
 
 
@@ -36,51 +39,41 @@ def k8s() -> None:
 @click.argument("cluster_name")
 @namespace_option
 @aws_options
-@click.option(
-    "--k8s-namespace",
-    "-k",
-    default="default",
-    show_default=True,
-    help="Kubernetes namespace for CA secret and Issuer",
-)
 def k8s_setup(
     cluster_name: str,
     namespace: str,
     region: str,
     profile: str | None,
-    k8s_namespace: str,
 ) -> None:
-    """Set up a Kubernetes cluster for IAM Roles Anywhere.
+    """Register a Kubernetes cluster for IAM Roles Anywhere.
 
-    Generates cluster-level manifests: CA Secret and cert-manager Issuer.
-    Apply these once per cluster before onboarding workloads.
+    Registers the cluster in IAM-RA state. CA manifests for each namespace
+    are generated during workload onboarding (not here).
 
     CLUSTER_NAME is a logical identifier for this K8s cluster (e.g., "prod", "staging").
 
     \b
     Prerequisites:
       - cert-manager must be installed in the cluster
-      - IAM-RA namespace must be initialized with self-signed CA mode
+      - IAM-RA namespace must be initialized
 
     \b
     Examples:
       iam-ra k8s setup prod
-      iam-ra k8s setup staging --k8s-namespace iam-ra-system
-
-    \b
-    After running, apply the manifests:
-      iam-ra k8s setup prod | kubectl apply -f -
+      iam-ra k8s setup staging
     """
     ctx = make_context(region, profile)
 
-    result = handle_result(
-        k8s_workflow.setup(ctx, namespace, cluster_name, k8s_namespace),
-        success_message=f"Cluster '{cluster_name}' set up successfully!",
+    handle_result(
+        k8s_workflow.setup(ctx, namespace, cluster_name),
+        success_message=f"Cluster '{cluster_name}' registered!",
     )
 
-    click.echo("# Apply these manifests to your cluster:", err=True)
-    click.echo("# kubectl apply -f <this-output>", err=True)
-    click.echo(result.manifests.to_yaml())
+    click.echo()
+    click.echo("Next step:")
+    click.echo(
+        f"  Onboard a workload: iam-ra k8s onboard <workload> --role <role> --cluster {cluster_name}"
+    )
 
 
 @k8s.command("teardown")
@@ -141,24 +134,23 @@ def k8s_teardown(
     "--role",
     "-R",
     "role_name",
-    required=True,
-    help="IAM-RA role for this workload (must exist)",
+    default=None,
+    help="IAM-RA role for this workload (default: same as workload name)",
 )
 @click.option(
     "--cluster",
     "-c",
     "cluster_name",
-    required=True,
-    help="K8s cluster (must be set up first)",
+    default=None,
+    help="K8s cluster (default: auto-select if only one exists)",
 )
 @namespace_option
 @aws_options
 @click.option(
     "--k8s-namespace",
     "-k",
-    default="default",
-    show_default=True,
-    help="Kubernetes namespace for the workload",
+    default=None,
+    help="Kubernetes namespace for the workload (default: role's scope)",
 )
 @click.option(
     "--duration-hours",
@@ -174,37 +166,80 @@ def k8s_teardown(
 )
 def k8s_onboard(
     workload_name: str,
-    role_name: str,
-    cluster_name: str,
+    role_name: str | None,
+    cluster_name: str | None,
     namespace: str,
     region: str,
     profile: str | None,
-    k8s_namespace: str,
+    k8s_namespace: str | None,
     duration_hours: int,
     no_sample_pod: bool,
 ) -> None:
     """Onboard a Kubernetes workload to IAM Roles Anywhere.
 
-    Generates workload-level manifests: Certificate, ConfigMap, and optionally a sample Pod.
+    Generates all manifests for the workload's namespace: CA Secret, Issuer,
+    Certificate, ConfigMap, and optionally a sample Pod.
 
-    WORKLOAD_NAME is a logical identifier for this workload (e.g., "payment-service").
+    WORKLOAD_NAME is a logical identifier for this workload (e.g., "cert-manager").
 
     \b
-    Prerequisites:
-      - Cluster must be set up first (iam-ra k8s setup)
-      - Role must exist (iam-ra role create)
+    Smart defaults:
+      -R  Role name defaults to WORKLOAD_NAME
+      -c  Cluster auto-selected if only one exists
+      -k  Namespace defaults to the role's scope
 
     \b
     Examples:
-      iam-ra k8s onboard payment-service --role admin --cluster prod
-      iam-ra k8s onboard api-gateway --role readonly --cluster staging -k gateway
-      iam-ra k8s onboard my-app --role admin --cluster prod --no-sample-pod
+      iam-ra k8s onboard cert-manager                    # All defaults
+      iam-ra k8s onboard longhorn-backup --cluster prod
+      iam-ra k8s onboard my-app -R admin -c prod -k my-namespace
 
     \b
     After running, apply the manifests:
-      iam-ra k8s onboard my-app --role admin --cluster prod | kubectl apply -f -
+      iam-ra k8s onboard cert-manager | kubectl apply -f -
     """
+
+    from iam_ra_cli.lib import state as state_module
+
     ctx = make_context(region, profile)
+
+    # Smart default: -R from workload name
+    if role_name is None:
+        role_name = workload_name
+        click.echo(f"Using role: {role_name} (from workload name)", err=True)
+
+    # Smart default: -c from single cluster
+    if cluster_name is None:
+        match state_module.load(ctx.ssm, ctx.s3, namespace):
+            case Ok(state) if state is not None and state.k8s_clusters:
+                clusters = list(state.k8s_clusters.keys())
+                if len(clusters) == 1:
+                    cluster_name = clusters[0]
+                    click.echo(f"Using cluster: {cluster_name} (only one registered)", err=True)
+                else:
+                    click.secho(
+                        f"Error: Multiple clusters exist ({', '.join(clusters)}). "
+                        "Specify one with --cluster/-c.",
+                        fg="red",
+                        err=True,
+                    )
+                    sys.exit(1)
+            case _:
+                click.secho(
+                    "Error: No clusters registered. Run 'iam-ra k8s setup' first.",
+                    fg="red",
+                    err=True,
+                )
+                sys.exit(1)
+
+    # Smart default: -k from role's scope
+    if k8s_namespace is None:
+        match state_module.load(ctx.ssm, ctx.s3, namespace):
+            case Ok(state) if state is not None and role_name in state.roles:
+                k8s_namespace = state.roles[role_name].scope
+                click.echo(f"Using k8s namespace: {k8s_namespace} (from role's scope)", err=True)
+            case _:
+                k8s_namespace = "default"
 
     result = handle_result(
         k8s_workflow.onboard(

@@ -6,6 +6,11 @@ Parameters:
     Type: String
     Description: Namespace identifier
 
+  Scope:
+    Type: String
+    Default: default
+    Description: CA scope name (for per-namespace isolation)
+
   CACertificateS3Key:
     Type: String
     Description: S3 object key for CA certificate
@@ -34,7 +39,7 @@ Resources:
   TrustAnchor:
     Type: AWS::RolesAnywhere::TrustAnchor
     Properties:
-      Name: !Sub "iam-ra-${Namespace}"
+      Name: !Sub "iam-ra-${Namespace}-${Scope}"
       Enabled: true
       Source:
         SourceType: CERTIFICATE_BUNDLE
@@ -43,10 +48,12 @@ Resources:
       Tags:
         - Key: iam-ra:namespace
           Value: !Ref Namespace
+        - Key: iam-ra:scope
+          Value: !Ref Scope
 
   TrustAnchorArnParameter:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: !Sub "/iam-ra/${Namespace}/trust-anchor-arn"
+      Name: !Sub "/iam-ra/${Namespace}/scopes/${Scope}/trust-anchor-arn"
       Type: String
       Value: !GetAtt TrustAnchor.TrustAnchorArn
