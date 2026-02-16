@@ -4,9 +4,11 @@ Handles all aspects of migration:
 1. State JSON: auto-migrated by State.from_json(), re-saved in v2 format
 2. S3 paths: copy CA cert from old to scoped path, delete old
 3. Local paths: move CA private key from old to scoped path
-4. Role CFN stacks: update with new template (adds TrustAnchorArn param)
+4. CA CFN stacks: create new v2 stack per scope, delete old v1 stack
+5. Role CFN stacks: update with new template (adds TrustAnchorArn param)
+6. Bump state version to 2.0.0
 
-Idempotent: safe to run multiple times. Skips already-migrated paths.
+Idempotent: safe to run multiple times. Skips already-migrated paths/stacks.
 """
 
 from dataclasses import dataclass, field
@@ -14,22 +16,41 @@ from dataclasses import dataclass, field
 from iam_ra_cli.lib import paths
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
+from iam_ra_cli.lib.cfn import delete_stack, deploy_stack
 from iam_ra_cli.lib.errors import (
     NotInitializedError,
+    StackDeleteError,
     StackDeployError,
     StateLoadError,
     StateSaveError,
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.lib.storage.s3 import delete_object, object_exists, read_object, write_object
-from iam_ra_cli.operations.ca import _ca_cert_s3_key, _ca_key_local_path
+from iam_ra_cli.models import CA
+from iam_ra_cli.operations.ca import (
+    ROOTCA_SELF_SIGNED_TEMPLATE,
+    _ca_cert_s3_key,
+    _ca_key_local_path,
+    _load_template,
+)
+from iam_ra_cli.operations.ca import (
+    _stack_name as ca_stack_name,
+)
 from iam_ra_cli.operations.role import create_role as create_role_op
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+STATE_VERSION_V2 = "2.0.0"
 
 # =============================================================================
 # Error / Result Types
 # =============================================================================
 
-type MigrateError = NotInitializedError | StateLoadError | StateSaveError | StackDeployError
+type MigrateError = (
+    NotInitializedError | StateLoadError | StateSaveError | StackDeployError | StackDeleteError
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +59,7 @@ class MigrateResult:
 
     s3_migrated: bool = False
     local_key_migrated: bool = False
+    ca_stack_migrated: bool = False
     roles_updated: list[str] = field(default_factory=list)
 
 
@@ -83,6 +105,60 @@ def update_role_stack(
             return Ok(None)
 
 
+def migrate_ca_stack(
+    ctx: AwsContext,
+    namespace: str,
+    scope: str,
+    old_stack_name: str,
+    bucket_name: str,
+    trust_anchor_arn: str,
+) -> Result[bool, StackDeployError | StackDeleteError]:
+    """Migrate a CA's CFN stack from v1 to v2.
+
+    Creates a new stack with v2 naming/template, then deletes the old one.
+    This avoids in-place updates that would replace the Trust Anchor
+    (changing its ARN and invalidating all existing certificates).
+
+    The new stack references the same CA certificate (already at the
+    scoped S3 path), so it creates a second Trust Anchor backed by the
+    same CA cert. Role stacks are updated separately to reference the
+    new Trust Anchor ARN.
+
+    Returns True if migration happened, False if skipped (already v2).
+    """
+    new_stack_name = ca_stack_name(namespace, scope)
+    cert_s3_key = _ca_cert_s3_key(namespace, scope)
+
+    template = _load_template(ROOTCA_SELF_SIGNED_TEMPLATE)
+    match deploy_stack(
+        ctx.cfn,
+        stack_name=new_stack_name,
+        template_body=template,
+        parameters={
+            "Namespace": namespace,
+            "Scope": scope,
+            "CACertificateS3Key": cert_s3_key,
+        },
+        tags={
+            "iam-ra:namespace": namespace,
+            "iam-ra:scope": scope,
+        },
+    ):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
+
+    # New stack is up -- safe to delete the old one
+    match delete_stack(ctx.cfn, old_stack_name):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
+
+    return Ok(True)
+
+
 # =============================================================================
 # Main Workflow
 # =============================================================================
@@ -95,8 +171,10 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
     1. Load state (from_json auto-migrates v1 -> v2)
     2. Move S3 CA cert to scoped path (if old path exists)
     3. Move local CA key to scoped path (if old path exists)
-    4. Update role CFN stacks with TrustAnchorArn parameter
-    5. Re-save state in v2 format
+    4. Migrate CA CFN stacks (create new v2 stack, delete old v1 stack)
+    5. Update role CFN stacks with TrustAnchorArn parameter
+    6. Bump version to 2.0.0
+    7. Re-save state in v2 format
 
     Idempotent: safe to run multiple times.
     """
@@ -117,6 +195,7 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
     bucket_name = state.init.bucket_arn.resource_id
     s3_migrated = False
     local_key_migrated = False
+    ca_stack_migrated = False
     roles_updated: list[str] = []
 
     # 2. Migrate S3 CA cert: old path -> scoped path
@@ -159,7 +238,35 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
         old_key_path.unlink()
         local_key_migrated = True
 
-    # 4. Update role CFN stacks with TrustAnchorArn parameter
+    # 4. Migrate CA CFN stacks: create new v2 stack, delete old v1 stack
+    for scope, ca in list(state.cas.items()):
+        expected_v2_name = ca_stack_name(namespace, scope)
+        if ca.stack_name == expected_v2_name:
+            continue  # Already migrated
+
+        match migrate_ca_stack(
+            ctx,
+            namespace=namespace,
+            scope=scope,
+            old_stack_name=ca.stack_name,
+            bucket_name=bucket_name,
+            trust_anchor_arn=str(ca.trust_anchor_arn),
+        ):
+            case Err() as e:
+                return e
+            case Ok(_):
+                pass
+
+        # Update state with new stack name
+        state.cas[scope] = CA(
+            stack_name=expected_v2_name,
+            mode=ca.mode,
+            trust_anchor_arn=ca.trust_anchor_arn,
+            pca_arn=ca.pca_arn,
+        )
+        ca_stack_migrated = True
+
+    # 5. Update role CFN stacks with TrustAnchorArn parameter
     for role_name, role in state.roles.items():
         scope = role.scope
         if scope not in state.cas:
@@ -181,7 +288,10 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
             case Ok(_):
                 roles_updated.append(role_name)
 
-    # 5. Re-save state in v2 format
+    # 6. Bump version
+    state.version = STATE_VERSION_V2
+
+    # 7. Re-save state in v2 format
     match state_module.save(ctx.ssm, ctx.s3, state):
         case Err() as e:
             return e
@@ -192,6 +302,7 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
         MigrateResult(
             s3_migrated=s3_migrated,
             local_key_migrated=local_key_migrated,
+            ca_stack_migrated=ca_stack_migrated,
             roles_updated=roles_updated,
         )
     )

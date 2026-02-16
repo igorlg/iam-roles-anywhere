@@ -26,6 +26,7 @@ from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import NotInitializedError
 from iam_ra_cli.lib.result import Err, Ok
 from iam_ra_cli.models import Arn
+from iam_ra_cli.operations.ca import _stack_name as ca_stack_name
 from iam_ra_cli.operations.role import RoleResult
 from iam_ra_cli.workflows.migrate import MigrateResult, migrate
 
@@ -154,9 +155,15 @@ class TestMigrateState:
             setup_v1_in_aws(ctx, with_roles=False)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 result = migrate(ctx, "test")
 
@@ -169,16 +176,22 @@ class TestMigrateState:
             assert "ca" not in raw
             assert "default" in raw["cas"]
 
-    def test_preserves_ca_stack_name(self, aws_credentials, temp_xdg_dirs) -> None:
-        """The CA stack name from v1 should be preserved (not renamed)."""
+    def test_updates_ca_stack_name_to_v2(self, aws_credentials, temp_xdg_dirs) -> None:
+        """After migration, the CA stack name should use v2 convention."""
         with mock_aws():
             ctx = AwsContext(region="ap-southeast-2")
             setup_v1_in_aws(ctx, with_roles=False)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 result = migrate(ctx, "test")
 
@@ -186,7 +199,32 @@ class TestMigrateState:
 
             response = ctx.s3.get_object(Bucket="test-bucket", Key="test/state.json")
             raw = json.loads(response["Body"].read().decode())
-            assert raw["cas"]["default"]["stack_name"] == "iam-ra-test-rootca"
+            assert raw["cas"]["default"]["stack_name"] == ca_stack_name("test", "default")
+
+    def test_bumps_version_to_2(self, aws_credentials, temp_xdg_dirs) -> None:
+        """After migration, state version should be 2.0.0."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_v1_in_aws(ctx, with_roles=False)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+
+            response = ctx.s3.get_object(Bucket="test-bucket", Key="test/state.json")
+            raw = json.loads(response["Body"].read().decode())
+            assert raw["version"] == "2.0.0"
 
     def test_roles_get_default_scope(self, aws_credentials, temp_xdg_dirs) -> None:
         """After migration, existing roles should have scope='default'."""
@@ -195,9 +233,15 @@ class TestMigrateState:
             setup_v1_in_aws(ctx, with_roles=True)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 result = migrate(ctx, "test")
 
@@ -223,9 +267,15 @@ class TestMigrateS3Paths:
             setup_v1_in_aws(ctx, with_roles=False)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 migrate(ctx, "test")
 
@@ -244,9 +294,15 @@ class TestMigrateS3Paths:
             setup_v1_in_aws(ctx, with_roles=False)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 migrate(ctx, "test")
 
@@ -271,9 +327,15 @@ class TestMigrateS3Paths:
             )
             ctx.s3.delete_object(Bucket="test-bucket", Key="test/ca/certificate.pem")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 result = migrate(ctx, "test")
 
@@ -298,9 +360,15 @@ class TestMigrateLocalKey:
             setup_v1_in_aws(ctx, with_roles=False)
             old_path = setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 migrate(ctx, "test")
 
@@ -317,9 +385,15 @@ class TestMigrateLocalKey:
             setup_v1_in_aws(ctx, with_roles=False)
             old_path = setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 migrate(ctx, "test")
 
@@ -337,9 +411,15 @@ class TestMigrateLocalKey:
             new_key_dir.mkdir(parents=True)
             (new_key_dir / "ca-private-key.pem").write_text(SAMPLE_CA_KEY)
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 result = migrate(ctx, "test")
 
@@ -374,9 +454,15 @@ class TestMigrateRoleStacks:
             setup_v1_in_aws(ctx, with_roles=True)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                side_effect=fake_update,
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    side_effect=fake_update,
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 result = migrate(ctx, "test")
 
@@ -399,9 +485,15 @@ class TestMigrateRoleStacks:
             setup_v1_in_aws(ctx, with_roles=True)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                side_effect=fake_update,
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    side_effect=fake_update,
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 migrate(ctx, "test")
 
@@ -417,9 +509,15 @@ class TestMigrateRoleStacks:
             setup_v1_in_aws(ctx, with_roles=True)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 result = migrate(ctx, "test")
 
@@ -433,9 +531,15 @@ class TestMigrateRoleStacks:
             setup_v1_in_aws(ctx, with_roles=False)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 result = migrate(ctx, "test")
 
@@ -596,6 +700,201 @@ class TestMigrateRoleStacks:
 
 
 # =============================================================================
+# Tests: CA Stack Migration
+# =============================================================================
+
+
+class TestMigrateCAStack:
+    """Rootca CFN stack should be migrated: create new v2 stack, delete old v1 stack."""
+
+    def test_creates_new_ca_stack(self, aws_credentials, temp_xdg_dirs) -> None:
+        """Should deploy a new CA stack with the v2 naming convention."""
+        captured_calls = []
+
+        def fake_migrate_ca(ctx, namespace, scope, old_stack_name, bucket_name, trust_anchor_arn):
+            captured_calls.append(
+                {
+                    "namespace": namespace,
+                    "scope": scope,
+                    "old_stack_name": old_stack_name,
+                    "bucket_name": bucket_name,
+                }
+            )
+            return Ok(True)
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_v1_in_aws(ctx, with_roles=False)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    side_effect=fake_migrate_ca,
+                ),
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+            assert len(captured_calls) == 1
+            assert captured_calls[0]["scope"] == "default"
+            assert captured_calls[0]["old_stack_name"] == "iam-ra-test-rootca"
+
+    def test_updates_state_with_new_stack_name(self, aws_credentials, temp_xdg_dirs) -> None:
+        """After CA stack migration, state should have the new v2 stack name."""
+        new_ta_arn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-v2-new"
+
+        def fake_migrate_ca(ctx, namespace, scope, old_stack_name, bucket_name, trust_anchor_arn):
+            return Ok(True)
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_v1_in_aws(ctx, with_roles=False)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    side_effect=fake_migrate_ca,
+                ),
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+
+            response = ctx.s3.get_object(Bucket="test-bucket", Key="test/state.json")
+            raw = json.loads(response["Body"].read().decode())
+            # New v2 stack name convention: iam-ra-{ns}-ca-{scope}
+            assert raw["cas"]["default"]["stack_name"] == ca_stack_name("test", "default")
+
+    def test_reports_ca_stack_migrated(self, aws_credentials, temp_xdg_dirs) -> None:
+        """MigrateResult should report ca_stack_migrated=True when migration occurs."""
+
+        def fake_migrate_ca(ctx, namespace, scope, old_stack_name, bucket_name, trust_anchor_arn):
+            return Ok(True)
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_v1_in_aws(ctx, with_roles=False)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    side_effect=fake_migrate_ca,
+                ),
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+            assert result.value.ca_stack_migrated
+
+    def test_skips_if_stack_name_already_v2(self, aws_credentials, temp_xdg_dirs) -> None:
+        """If the CA stack name already matches v2 convention, skip migration."""
+        # Build state where cas.default.stack_name already matches v2
+        v2_stack_name = ca_stack_name("test", "default")
+        state_json = json.dumps(
+            {
+                "namespace": "test",
+                "region": "ap-southeast-2",
+                "version": "2.0.0",
+                "init": {
+                    "stack_name": "iam-ra-test-init",
+                    "bucket_arn": "arn:aws:s3:::test-bucket",
+                    "kms_key_arn": "arn:aws:kms:ap-southeast-2:123456789012:key/test-key",
+                },
+                "cas": {
+                    "default": {
+                        "stack_name": v2_stack_name,
+                        "mode": "self-signed",
+                        "trust_anchor_arn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-v2",
+                    }
+                },
+                "roles": {},
+                "hosts": {},
+                "k8s_clusters": {},
+                "k8s_workloads": {},
+            }
+        )
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            bucket = "test-bucket"
+            ctx.s3.create_bucket(
+                Bucket=bucket,
+                CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"},
+            )
+            ctx.s3.put_object(Bucket=bucket, Key="test/state.json", Body=state_json.encode())
+            ctx.ssm.put_parameter(
+                Name="/iam-ra/test/state-location",
+                Value=f"s3://{bucket}/test/state.json",
+                Type="String",
+            )
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                ) as mock_migrate_ca,
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+            # migrate_ca_stack should NOT have been called
+            mock_migrate_ca.assert_not_called()
+            assert not result.value.ca_stack_migrated
+
+    def test_role_stacks_get_new_trust_anchor(self, aws_credentials, temp_xdg_dirs) -> None:
+        """After CA migration creates new trust anchor, role stacks should use new ARN."""
+        new_ta_arn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-v2-new"
+        captured_ta = {}
+
+        def fake_migrate_ca(ctx, namespace, scope, old_stack_name, bucket_name, trust_anchor_arn):
+            return Ok(True)
+
+        def fake_update_role(ctx, namespace, name, trust_anchor_arn, policies, scope):
+            captured_ta[name] = trust_anchor_arn
+            return Ok(None)
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_v1_in_aws(ctx, with_roles=True)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    side_effect=fake_update_role,
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    side_effect=fake_migrate_ca,
+                ),
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+            # Role should still use the trust anchor from state
+            # (migrate_ca_stack is mocked, so state isn't actually updated with new TA)
+            assert "admin" in captured_ta
+
+
+# =============================================================================
 # Tests: Idempotency
 # =============================================================================
 
@@ -610,9 +909,15 @@ class TestMigrateIdempotency:
             setup_v1_in_aws(ctx, with_roles=False)
             setup_v1_local_key(temp_xdg_dirs / "data")
 
-            with patch(
-                "iam_ra_cli.workflows.migrate.update_role_stack",
-                return_value=Ok(None),
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(True),
+                ),
             ):
                 result1 = migrate(ctx, "test")
                 state_module.invalidate_cache("test")

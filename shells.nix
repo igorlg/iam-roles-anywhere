@@ -42,6 +42,9 @@ forAllSystems (
 
           # CloudFormation linting
           # pkgs.cfn-lint
+
+          # Utilities
+          pkgs.cloc
         ];
 
       env = {
