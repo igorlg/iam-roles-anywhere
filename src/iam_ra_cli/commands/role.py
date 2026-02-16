@@ -31,6 +31,12 @@ def role() -> None:
     help="Managed policy ARN to attach (can specify multiple times)",
 )
 @click.option(
+    "--scope",
+    default="default",
+    show_default=True,
+    help="CA scope this role belongs to (must have 'iam-ra ca setup --scope NAME' first)",
+)
+@click.option(
     "--session-duration",
     default=3600,
     show_default=True,
@@ -42,6 +48,7 @@ def role_create(
     region: str,
     profile: str | None,
     policies: tuple[str, ...],
+    scope: str,
     session_duration: int,
 ) -> None:
     """Create an IAM role with Roles Anywhere profile.
@@ -51,11 +58,12 @@ def role_create(
     \b
     Examples:
       iam-ra role create admin --policy arn:aws:iam::aws:policy/AdministratorAccess
-      iam-ra role create readonly --policy arn:aws:iam::aws:policy/ReadOnlyAccess
+      iam-ra role create cert-manager --scope cert-manager --policy arn:...
       iam-ra role create dev --policy arn:aws:iam::123:policy/DevPolicy --session-duration 7200
     """
     click.echo(f"Creating role: {name}")
     echo_key_value("Namespace", namespace, indent=1)
+    echo_key_value("Scope", scope, indent=1)
     echo_key_value("Policies", len(policies), indent=1)
     echo_key_value("Session duration", f"{session_duration}s", indent=1)
     click.echo()
@@ -63,13 +71,21 @@ def role_create(
     ctx = make_context(region, profile)
 
     new_role = handle_result(
-        create_role(ctx, namespace, name, list(policies) if policies else None, session_duration),
+        create_role(
+            ctx,
+            namespace,
+            name,
+            list(policies) if policies else None,
+            session_duration,
+            scope=scope,
+        ),
         success_message=f"Role '{name}' ready!",
     )
 
     click.echo()
     echo_key_value("Role ARN", str(new_role.role_arn), indent=1)
     echo_key_value("Profile ARN", str(new_role.profile_arn), indent=1)
+    echo_key_value("Scope", new_role.scope, indent=1)
 
     click.echo()
     click.echo("Next step:")
@@ -147,6 +163,7 @@ def role_list(
     click.echo()
     for name, r in sorted(roles.items()):
         click.echo(f"  {name}")
+        echo_key_value("Scope", r.scope, indent=2)
         echo_key_value("Role ARN", str(r.role_arn), indent=2)
         echo_key_value("Profile ARN", str(r.profile_arn), indent=2)
         if r.policies:
