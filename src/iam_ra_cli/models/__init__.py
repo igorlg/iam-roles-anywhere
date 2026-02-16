@@ -116,6 +116,7 @@ class K8sCluster:
     """
 
     name: str
+    k8s_namespace: str = "default"
 
 
 @dataclass(frozen=True)

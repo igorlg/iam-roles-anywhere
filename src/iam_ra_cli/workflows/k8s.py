@@ -56,6 +56,8 @@ type OnboardError = (
     NotInitializedError
     | K8sClusterNotFoundError
     | RoleNotFoundError
+    | CAKeyNotFoundError
+    | S3ReadError
     | StateLoadError
     | StateSaveError
 )
@@ -173,7 +175,9 @@ def setup(
 
     # Create or retrieve cluster record (idempotent)
     already_exists = cluster_name in state.k8s_clusters
-    cluster = state.k8s_clusters.get(cluster_name, K8sCluster(name=cluster_name))
+    cluster = state.k8s_clusters.get(
+        cluster_name, K8sCluster(name=cluster_name, k8s_namespace=k8s_namespace)
+    )
 
     if not already_exists:
         state.k8s_clusters[cluster_name] = cluster
@@ -286,11 +290,34 @@ def onboard(
     if cluster_name not in state.k8s_clusters:
         return Err(K8sClusterNotFoundError(cluster_name))
 
+    cluster = state.k8s_clusters[cluster_name]
+
     # Check role exists
     if role_name not in state.roles:
         return Err(RoleNotFoundError(namespace, role_name))
 
     role = state.roles[role_name]
+
+    # If the workload namespace differs from the cluster's setup namespace,
+    # we need the CA material to generate a namespace-local Issuer + CA Secret.
+    ca_cert_pem: str | None = None
+    ca_key_pem: str | None = None
+
+    if cluster.k8s_namespace != k8s_namespace:
+        assert state.init is not None
+        bucket_name = state.init.bucket_arn.resource_id
+        ca_cert_key = _ca_cert_s3_key(namespace)
+
+        match read_object(ctx.s3, bucket_name, ca_cert_key):
+            case Err(e):
+                return Err(e)
+            case Ok(cert_pem):
+                ca_cert_pem = cert_pem
+
+        ca_key_path = data_dir() / namespace / "ca-private-key.pem"
+        if not ca_key_path.exists():
+            return Err(CAKeyNotFoundError(ca_key_path))
+        ca_key_pem = ca_key_path.read_text()
 
     # Generate manifests
     manifests = generate_workload_manifests(
@@ -301,6 +328,9 @@ def onboard(
         namespace=k8s_namespace,
         duration_hours=duration_hours,
         include_sample_pod=include_sample_pod,
+        cluster_namespace=cluster.k8s_namespace,
+        ca_cert_pem=ca_cert_pem,
+        ca_key_pem=ca_key_pem,
     )
 
     # Create or retrieve workload record (idempotent)
