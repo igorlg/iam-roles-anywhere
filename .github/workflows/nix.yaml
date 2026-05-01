@@ -9,6 +9,20 @@ on:
   push:
     branches-ignore:
       - main
+    paths:
+      # Nix-level files
+      - '**/*.nix'
+      - 'flake.lock'
+      # Files the Nix package build reads (via uv2nix)
+      - 'src/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
+      - 'VERSION'
+      # Nix-rendered content (checks assert CLI loads)
+      - 'examples/**'
+      # Self-trigger on workflow changes
+      - '.github/workflows/nix.yaml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
