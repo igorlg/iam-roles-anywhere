@@ -115,26 +115,41 @@ def make_context(region: str, profile: str | None) -> AwsContext:
     return AwsContext(region=region, profile=profile)
 
 
-def handle_result(result: Result[T, Any], success_message: str | None = None) -> T:
+def handle_result(
+    result: Result[T, Any],
+    success_message: str | None = None,
+    as_json: bool = False,
+) -> T:
     """Handle a Result, exiting on error with appropriate message.
 
-    On Ok: returns the value, optionally prints success message
-    On Err: prints error and exits with code 1
+    On Ok: returns the value, optionally prints success message (suppressed
+    when as_json=True so JSON consumers aren't polluted by human output).
+    On Err: prints error and exits with code 1. When as_json=True, the error
+    is emitted as structured JSON to stderr; otherwise it's human-readable
+    red text.
     """
     match result:
         case Ok(value):
-            if success_message:
+            if success_message and not as_json:
                 click.secho(success_message, fg="green", bold=True, err=True)
             return value
         case Err(error):
-            handle_error(error)
+            handle_error(error, as_json=as_json)
             sys.exit(1)  # Should never reach here, but for type checker
 
 
-def handle_error(error: Any) -> None:
-    """Print error message and exit."""
-    message = _format_error(error)
-    click.secho(f"Error: {message}", fg="red", err=True)
+def handle_error(error: Any, as_json: bool = False) -> None:
+    """Print error message and exit.
+
+    When as_json=True, emit a structured error payload to stderr so that
+    scripts can parse it with jq. Otherwise, print the human-readable
+    red 'Error: ...' message (status quo behaviour).
+    """
+    if as_json:
+        click.echo(render_json_error(error), err=True)
+    else:
+        message = _format_error(error)
+        click.secho(f"Error: {message}", fg="red", err=True)
     sys.exit(1)
 
 
@@ -241,8 +256,85 @@ def _format_error(error: Any) -> str:
 
 
 def to_json(obj: Any) -> str:
-    """Convert object to JSON string."""
+    """Convert object to JSON string.
+
+    NOTE: this is the legacy helper. New code should use `render_json(payload)`
+    which wraps the payload with a stable `schema_version` envelope. Kept for
+    backwards-compat during the migration.
+    """
     return json.dumps(_to_serializable(obj), indent=2)
+
+
+# =============================================================================
+# JSON output schema
+#
+# All --json output follows a shared, minimally-invasive envelope:
+#
+#   Success (stdout):
+#     {
+#       "schema_version": "v1",
+#       ...command-specific fields...
+#     }
+#
+#   Error (stderr, exit code non-zero):
+#     {
+#       "schema_version": "v1",
+#       "error": {
+#         "type": "<DataclassName>",
+#         "message": "<human-readable>",
+#         "fields": { ...dataclass attrs... }
+#       }
+#     }
+#
+# Versioning policy: additive changes to payload shape are safe under v1.
+# Removing or renaming a field, or changing field semantics, requires bumping
+# the schema_version (v2 etc.) and documenting the migration.
+# =============================================================================
+
+JSON_SCHEMA_VERSION = "v1"
+
+
+def render_json(payload: dict[str, Any]) -> str:
+    """Render a command's success payload with the versioned envelope.
+
+    Args:
+        payload: Command-specific fields. Will be merged with the schema
+            version header so the resulting JSON object has
+            `schema_version` at the top alongside the payload's own keys.
+
+    Returns:
+        Pretty-printed JSON string. Suitable for click.echo() to stdout.
+    """
+    envelope: dict[str, Any] = {"schema_version": JSON_SCHEMA_VERSION}
+    envelope.update(_to_serializable(payload))
+    return json.dumps(envelope, indent=2)
+
+
+def render_json_error(error: Any) -> str:
+    """Render an error as a structured JSON payload.
+
+    Used when --json is set and a command fails. The resulting JSON has:
+      - schema_version (stable envelope)
+      - error.type (dataclass class name, for programmatic dispatch)
+      - error.message (human-readable, matches _format_error output)
+      - error.fields (dataclass attributes, so scripts can extract specifics)
+    """
+    from dataclasses import asdict, is_dataclass
+
+    if is_dataclass(error) and not isinstance(error, type):
+        fields = _to_serializable(asdict(error))
+    else:
+        fields = {}
+
+    payload: dict[str, Any] = {
+        "schema_version": JSON_SCHEMA_VERSION,
+        "error": {
+            "type": type(error).__name__,
+            "message": _format_error(error),
+            "fields": fields,
+        },
+    }
+    return json.dumps(payload, indent=2)
 
 
 def _to_serializable(obj: Any) -> Any:

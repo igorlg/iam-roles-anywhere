@@ -9,7 +9,7 @@ from iam_ra_cli.commands.common import (
     json_option,
     make_context,
     namespace_option,
-    to_json,
+    render_json,
 )
 from iam_ra_cli.workflows import get_status
 
@@ -38,7 +38,81 @@ def status(
     current = get_status(ctx, namespace)
 
     if as_json:
-        click.echo(to_json(current))
+        # Schema (v1):
+        #   { "schema_version": "v1",
+        #     "namespace": str,
+        #     "region": str,
+        #     "initialized": bool,
+        #     "infrastructure": { "stack_name": str, "bucket": str,
+        #                         "kms_key_arn": str } | null,
+        #     "cas": [ { "scope": str, "mode": str,
+        #                "trust_anchor_arn": str,
+        #                "pca_arn": str | null,
+        #                "internal": { "stack_name": str } }, ... ],
+        #     "roles": [ { "name": str, "scope": str,
+        #                  "role_arn": str, "profile_arn": str,
+        #                  "policies": [str],
+        #                  "internal": { "stack_name": str } }, ... ],
+        #     "hosts": [ { "hostname": str, "role_name": str,
+        #                  "internal": { "stack_name": str,
+        #                                "certificate_secret_arn": str,
+        #                                "private_key_secret_arn": str } }, ...]
+        #   }
+        infra = (
+            {
+                "stack_name": current.init.stack_name,
+                "bucket": current.init.bucket_arn.resource_id,
+                "kms_key_arn": str(current.init.kms_key_arn),
+            }
+            if current.init is not None
+            else None
+        )
+        cas = [
+            {
+                "scope": scope_name,
+                "mode": ca.mode.value,
+                "trust_anchor_arn": str(ca.trust_anchor_arn),
+                "pca_arn": str(ca.pca_arn) if ca.pca_arn else None,
+                "internal": {"stack_name": ca.stack_name},
+            }
+            for scope_name, ca in sorted(current.cas.items())
+        ]
+        roles = [
+            {
+                "name": name,
+                "scope": role.scope,
+                "role_arn": str(role.role_arn),
+                "profile_arn": str(role.profile_arn),
+                "policies": [str(p) for p in role.policies],
+                "internal": {"stack_name": role.stack_name},
+            }
+            for name, role in sorted(current.roles.items())
+        ]
+        hosts = [
+            {
+                "hostname": hostname,
+                "role_name": host.role_name,
+                "internal": {
+                    "stack_name": host.stack_name,
+                    "certificate_secret_arn": str(host.certificate_secret_arn),
+                    "private_key_secret_arn": str(host.private_key_secret_arn),
+                },
+            }
+            for hostname, host in sorted(current.hosts.items())
+        ]
+        click.echo(
+            render_json(
+                {
+                    "namespace": current.namespace,
+                    "region": current.region,
+                    "initialized": current.initialized,
+                    "infrastructure": infra,
+                    "cas": cas,
+                    "roles": roles,
+                    "hosts": hosts,
+                }
+            )
+        )
         return
 
     # Human-readable output

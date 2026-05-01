@@ -11,7 +11,7 @@ from iam_ra_cli.commands.common import (
     json_option,
     make_context,
     namespace_option,
-    to_json,
+    render_json,
 )
 from iam_ra_cli.lib.sops import get_nix_repo_root
 from iam_ra_cli.workflows import list_hosts, offboard, onboard
@@ -151,35 +151,62 @@ def _render_human(result: OnboardResult) -> None:
     )
 
 
-def _render_json(result: OnboardResult) -> None:
-    """Emit the onboard result as JSON for scripts/automation.
+def _build_json_payload(result: OnboardResult) -> dict[str, object]:
+    """Build the JSON payload for `host onboard --json`.
 
-    TODO: implement proper JSON shape. Candidate schema:
-        {
-          "hostname": "...",
-          "namespace": "...",
-          "region": "...",
-          "role_name": "...",
-          "trust_anchor_arn": "...",
-          "profile_arn": "...",
-          "role_arn": "...",
-          "secrets_file": {
-            "path": "/abs/path/iam-ra.yaml",
-            "relative_path": "secrets/hosts/.../iam-ra.yaml",  // null if outside repo
-            "keys": ["certificate", "private_key", ...],
-            "encrypted": true
-          },
-          "internal": {
-            "certificate_secret_arn": "...",
-            "private_key_secret_arn": "...",
-            "stack_name": "..."
-          }
+    Schema (v1):
+      {
+        "hostname": str,
+        "namespace": str,
+        "region": str,
+        "role_name": str,
+        "trust_anchor_arn": str,       # ARN for programs.iamRolesAnywhere
+        "profile_arn": str,
+        "role_arn": str,
+        "secrets_file": {               # null when --no-sops
+          "path": str,                  # absolute path to SOPS file
+          "relative_path": str | null,  # relative to flake root (null if outside)
+          "encrypted": bool,
+          "keys": [str, ...]            # YAML keys inside the SOPS file
+        } | null,
+        "internal": {                   # internal AWS resource IDs, not for Nix
+          "stack_name": str,
+          "certificate_secret_arn": str,
+          "private_key_secret_arn": str
         }
-    Until implemented, fall back to the generic to_json() serializer.
+      }
     """
-    # TODO(#TBD): replace with the schema above; exposing the dataclass as-is
-    # leaks internal field names but is better than nothing for scripts.
-    click.echo(to_json(result))
+    if result.secrets_file is not None:
+        _abs, _root, rel = _sops_paths(result.secrets_file.path)
+        secrets_file_payload: dict[str, object] | None = {
+            "path": str(result.secrets_file.path.resolve()),
+            "relative_path": str(rel) if rel is not None else None,
+            "encrypted": result.secrets_file.encrypted,
+            "keys": list(SOPS_KEYS),
+        }
+    else:
+        secrets_file_payload = None
+
+    return {
+        "hostname": result.host.hostname,
+        "namespace": result.namespace,
+        "region": result.region,
+        "role_name": result.host.role_name,
+        "trust_anchor_arn": str(result.trust_anchor_arn),
+        "profile_arn": str(result.profile_arn),
+        "role_arn": str(result.role_arn),
+        "secrets_file": secrets_file_payload,
+        "internal": {
+            "stack_name": result.host.stack_name,
+            "certificate_secret_arn": str(result.host.certificate_secret_arn),
+            "private_key_secret_arn": str(result.host.private_key_secret_arn),
+        },
+    }
+
+
+def _render_json(result: OnboardResult) -> None:
+    """Emit the onboard result as JSON for scripts/automation."""
+    click.echo(render_json(_build_json_payload(result)))
 
 
 @click.group()
@@ -276,6 +303,7 @@ def host_onboard(
         success_message=(
             None if as_json else f"Host '{hostname}' onboarded successfully!"
         ),
+        as_json=as_json,
     )
 
     if as_json:
@@ -336,10 +364,33 @@ def host_list(
     """
     ctx = make_context(region, profile)
 
-    hosts = handle_result(list_hosts(ctx, namespace))
+    hosts = handle_result(list_hosts(ctx, namespace), as_json=as_json)
 
     if as_json:
-        click.echo(to_json(hosts))
+        # Schema (v1):
+        #   { "schema_version": "v1",
+        #     "namespace": str,
+        #     "items": [
+        #       { "hostname": str, "role_name": str,
+        #         "internal": { "stack_name": str,
+        #                       "certificate_secret_arn": str,
+        #                       "private_key_secret_arn": str } },
+        #       ...
+        #     ]
+        #   }
+        items = [
+            {
+                "hostname": h.hostname,
+                "role_name": h.role_name,
+                "internal": {
+                    "stack_name": h.stack_name,
+                    "certificate_secret_arn": str(h.certificate_secret_arn),
+                    "private_key_secret_arn": str(h.private_key_secret_arn),
+                },
+            }
+            for h in sorted(hosts.values(), key=lambda h: h.hostname)
+        ]
+        click.echo(render_json({"namespace": namespace, "items": items}))
         return
 
     if not hosts:
