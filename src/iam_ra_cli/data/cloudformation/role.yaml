@@ -32,7 +32,7 @@ Parameters:
 Outputs:
   Version:
     Description: Template version
-    Value: "2.3.1"
+    Value: "2.4.0"
 
   RoleArn:
     Description: IAM Role ARN
