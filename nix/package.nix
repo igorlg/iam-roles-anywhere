@@ -21,7 +21,7 @@ let
     system:
     let
       pkgs = inputs.nixpkgs.legacyPackages.${system};
-      python = pkgs.python312;
+      python = pkgs.python313;
     in
     (pkgs.callPackage inputs.pyproject-nix.build.packages {
       inherit python;
