@@ -9,7 +9,7 @@ from iam_ra_cli.commands.common import (
     json_option,
     make_context,
     namespace_option,
-    to_json,
+    render_json,
 )
 from iam_ra_cli.workflows import create_role, delete_role, list_roles
 
@@ -147,10 +147,32 @@ def role_list(
     """
     ctx = make_context(region, profile)
 
-    roles = handle_result(list_roles(ctx, namespace))
+    roles = handle_result(list_roles(ctx, namespace), as_json=as_json)
 
     if as_json:
-        click.echo(to_json(roles))
+        # Schema (v1):
+        #   { "schema_version": "v1",
+        #     "namespace": str,
+        #     "items": [
+        #       { "name": str, "scope": str,
+        #         "role_arn": str, "profile_arn": str,
+        #         "policies": [str, ...],
+        #         "internal": { "stack_name": str } },
+        #       ...
+        #     ]
+        #   }
+        items = [
+            {
+                "name": name,
+                "scope": r.scope,
+                "role_arn": str(r.role_arn),
+                "profile_arn": str(r.profile_arn),
+                "policies": [str(p) for p in r.policies],
+                "internal": {"stack_name": r.stack_name},
+            }
+            for name, r in sorted(roles.items())
+        ]
+        click.echo(render_json({"namespace": namespace, "items": items}))
         return
 
     if not roles:

@@ -12,7 +12,7 @@ from iam_ra_cli.commands.common import (
     json_option,
     make_context,
     namespace_option,
-    to_json,
+    render_json,
 )
 from iam_ra_cli.lib.result import Ok
 from iam_ra_cli.workflows import k8s as k8s_workflow
@@ -342,10 +342,48 @@ def k8s_list(
     """
     ctx = make_context(region, profile)
 
-    result = handle_result(k8s_workflow.list_k8s(ctx, namespace, cluster_name))
+    result = handle_result(
+        k8s_workflow.list_k8s(ctx, namespace, cluster_name), as_json=as_json
+    )
 
     if as_json:
-        click.echo(to_json({"clusters": result.clusters, "workloads": result.workloads}))
+        # Schema (v1):
+        #   { "schema_version": "v1",
+        #     "namespace": str,
+        #     "clusters": [ { "name": str, "workload_count": int }, ... ],
+        #     "workloads": [
+        #       { "name": str, "cluster_name": str, "role_name": str,
+        #         "k8s_namespace": str },
+        #       ...
+        #     ]
+        #   }
+        clusters = [
+            {
+                "name": name,
+                "workload_count": sum(
+                    1 for w in result.workloads.values() if w.cluster_name == name
+                ),
+            }
+            for name in sorted(result.clusters)
+        ]
+        workloads = [
+            {
+                "name": w.name,
+                "cluster_name": w.cluster_name,
+                "role_name": w.role_name,
+                "k8s_namespace": w.namespace,
+            }
+            for w in sorted(result.workloads.values(), key=lambda w: w.name)
+        ]
+        click.echo(
+            render_json(
+                {
+                    "namespace": namespace,
+                    "clusters": clusters,
+                    "workloads": workloads,
+                }
+            )
+        )
         return
 
     if not result.clusters and not result.workloads:

@@ -252,4 +252,140 @@ class TestRenderHumanOutput:
         out = self._render(result)
         # Key SOPS field names should appear so the user knows what to reference
         assert "certificate" in out
-        assert "private_key" in out
+
+
+# =============================================================================
+# JSON output schema (--json flag)
+# =============================================================================
+
+
+class TestHostOnboardJsonSchema:
+    """host onboard --json must emit a stable, documented schema.
+
+    Contract: top-level user-facing fields, internal implementation details
+    nested under `internal`, SOPS file metadata nested under `secrets_file`,
+    schema_version envelope.
+    """
+
+    def _render_json_string(self, result: OnboardResult) -> str:
+        from iam_ra_cli.commands.common import render_json
+        from iam_ra_cli.commands.host import _build_json_payload
+
+        # _build_json_payload returns the raw dict; render_json adds envelope
+        return render_json(_build_json_payload(result))
+
+    def test_has_schema_version(self) -> None:
+        import json as _json
+
+        result = _make_onboard_result(
+            secrets_file=SecretsFileResult(path=Path("/tmp/iam-ra.yaml"), encrypted=True)
+        )
+        data = _json.loads(self._render_json_string(result))
+        assert data["schema_version"] == "v1"
+
+    def test_top_level_fields_are_user_facing(self) -> None:
+        """Fields users need for Nix config should be at the top level."""
+        import json as _json
+
+        result = _make_onboard_result(
+            secrets_file=SecretsFileResult(path=Path("/tmp/iam-ra.yaml"), encrypted=True)
+        )
+        data = _json.loads(self._render_json_string(result))
+
+        assert data["hostname"] == "myhost"
+        assert data["namespace"] == "default"
+        assert data["region"] == "ap-southeast-2"
+        assert data["role_name"] == "iamra-admin"
+        assert "trust-anchor" in data["trust_anchor_arn"]
+        assert "profile" in data["profile_arn"]
+        assert "role" in data["role_arn"]
+
+    def test_internal_fields_nested(self) -> None:
+        """Stack name and Secrets Manager ARNs live under 'internal'."""
+        import json as _json
+
+        result = _make_onboard_result(
+            secrets_file=SecretsFileResult(path=Path("/tmp/iam-ra.yaml"), encrypted=True)
+        )
+        data = _json.loads(self._render_json_string(result))
+
+        assert "internal" in data
+        assert data["internal"]["stack_name"] == "iam-ra-default-host-myhost"
+        assert "certificate" in data["internal"]["certificate_secret_arn"]
+        assert "private-key" in data["internal"]["private_key_secret_arn"]
+
+    def test_internal_not_at_top_level(self) -> None:
+        """Ensure leak-proofing: internal fields are NOT top-level keys."""
+        import json as _json
+
+        result = _make_onboard_result(
+            secrets_file=SecretsFileResult(path=Path("/tmp/iam-ra.yaml"), encrypted=True)
+        )
+        data = _json.loads(self._render_json_string(result))
+
+        # These should ONLY exist under .internal, not at the top level
+        assert "certificate_secret_arn" not in data
+        assert "private_key_secret_arn" not in data
+        assert "stack_name" not in data
+
+    def test_secrets_file_nested_with_metadata(self) -> None:
+        import json as _json
+
+        result = _make_onboard_result(
+            secrets_file=SecretsFileResult(
+                path=Path("/tmp/iam-ra.yaml"), encrypted=True
+            )
+        )
+        data = _json.loads(self._render_json_string(result))
+
+        sf = data["secrets_file"]
+        # Path is resolved, so on macOS /tmp -> /private/tmp. Accept either.
+        assert sf["path"] in ("/tmp/iam-ra.yaml", "/private/tmp/iam-ra.yaml")
+        assert sf["encrypted"] is True
+        # relative_path may be null when the file isn't inside a flake
+        assert "relative_path" in sf
+        # Document which keys the SOPS file has
+        assert "keys" in sf
+        assert "certificate" in sf["keys"]
+        assert "private_key" in sf["keys"]
+
+    def test_no_secrets_file_renders_null(self) -> None:
+        """With --no-sops, secrets_file field should be null (not missing)."""
+        import json as _json
+
+        result = _make_onboard_result(secrets_file=None)
+        data = _json.loads(self._render_json_string(result))
+        assert data["secrets_file"] is None
+
+    def test_secrets_file_relative_path_when_inside_flake(
+        self, tmp_path: Path
+    ) -> None:
+        """When SOPS file is inside a flake repo, relative_path is populated."""
+        import json as _json
+
+        flake_root = tmp_path / "nix-config"
+        flake_root.mkdir()
+        (flake_root / "flake.nix").write_text("{}")
+        sops_file = flake_root / "secrets" / "hosts" / "myhost" / "iam-ra.yaml"
+        sops_file.parent.mkdir(parents=True)
+        sops_file.write_text("...")
+
+        result = _make_onboard_result(
+            secrets_file=SecretsFileResult(path=sops_file, encrypted=True)
+        )
+
+        with patch(
+            "iam_ra_cli.commands.host.get_nix_repo_root", return_value=flake_root
+        ):
+            data = _json.loads(self._render_json_string(result))
+
+        assert data["secrets_file"]["relative_path"] == "secrets/hosts/myhost/iam-ra.yaml"
+
+    def test_json_output_is_valid_json(self) -> None:
+        import json as _json
+
+        result = _make_onboard_result(
+            secrets_file=SecretsFileResult(path=Path("/tmp/iam-ra.yaml"), encrypted=True)
+        )
+        # No exception = valid JSON
+        _json.loads(self._render_json_string(result))

@@ -9,7 +9,7 @@ from iam_ra_cli.commands.common import (
     json_option,
     make_context,
     namespace_option,
-    to_json,
+    render_json,
 )
 from iam_ra_cli.workflows.ca import (
     delete_scope as delete_scope_workflow,
@@ -152,10 +152,30 @@ def ca_list(
     """
     ctx = make_context(region, profile)
 
-    cas = handle_result(list_cas_workflow(ctx, namespace))
+    cas = handle_result(list_cas_workflow(ctx, namespace), as_json=as_json)
 
     if as_json:
-        click.echo(to_json(cas))
+        # Schema (v1):
+        #   { "schema_version": "v1",
+        #     "namespace": str,
+        #     "items": [
+        #       { "scope": str, "mode": str, "trust_anchor_arn": str,
+        #         "pca_arn": str | null,
+        #         "internal": { "stack_name": str } },
+        #       ...
+        #     ]
+        #   }
+        items = [
+            {
+                "scope": scope_name,
+                "mode": ca_info.mode.value,
+                "trust_anchor_arn": str(ca_info.trust_anchor_arn),
+                "pca_arn": str(ca_info.pca_arn) if ca_info.pca_arn else None,
+                "internal": {"stack_name": ca_info.stack_name},
+            }
+            for scope_name, ca_info in sorted(cas.items())
+        ]
+        click.echo(render_json({"namespace": namespace, "items": items}))
         return
 
     if not cas:
