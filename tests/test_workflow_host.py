@@ -427,3 +427,129 @@ class TestOnboardErrorTypeUnion:
 
             assert isinstance(result, Err)
             assert isinstance(result.error, NotInitializedError)
+
+
+class TestOnboardResultFields:
+    """OnboardResult must expose everything the CLI needs to guide the user's
+    Nix setup: trust anchor / profile / role ARNs, region, namespace.
+
+    Without these, the CLI only has secrets manager ARNs (internal AWS
+    resources) and has to emit generic placeholder Nix snippets.
+    """
+
+    def test_result_has_trust_anchor_arn(
+        self, aws_credentials, temp_xdg_dirs, state_default_scope: State
+    ) -> None:
+        """OnboardResult.trust_anchor_arn should match the scope's trust anchor."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_state_in_aws(ctx, state_default_scope)
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.onboard_host_self_signed",
+                    return_value=Ok(MOCK_HOST_RESULT),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.create_secrets_file",
+                    return_value=Ok(SecretsFileResult(path=Path("/tmp/s.yaml"), encrypted=False)),
+                ),
+            ):
+                config = OnboardConfig(
+                    namespace="test",
+                    hostname="myhost",
+                    role_name="admin",
+                )
+                result = onboard(ctx, config)
+
+            assert isinstance(result, Ok)
+            assert "ta-default" in str(result.value.trust_anchor_arn)
+
+    def test_result_has_profile_and_role_arns(
+        self, aws_credentials, temp_xdg_dirs, state_default_scope: State
+    ) -> None:
+        """OnboardResult.profile_arn/role_arn should match the role's."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_state_in_aws(ctx, state_default_scope)
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.onboard_host_self_signed",
+                    return_value=Ok(MOCK_HOST_RESULT),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.create_secrets_file",
+                    return_value=Ok(SecretsFileResult(path=Path("/tmp/s.yaml"), encrypted=False)),
+                ),
+            ):
+                config = OnboardConfig(
+                    namespace="test",
+                    hostname="myhost",
+                    role_name="admin",
+                )
+                result = onboard(ctx, config)
+
+            assert isinstance(result, Ok)
+            assert str(result.value.profile_arn) == (
+                "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin-profile"
+            )
+            assert str(result.value.role_arn) == "arn:aws:iam::123456789012:role/admin"
+
+    def test_result_has_region_and_namespace(
+        self, aws_credentials, temp_xdg_dirs, state_default_scope: State
+    ) -> None:
+        """OnboardResult should carry region and namespace for downstream output."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_state_in_aws(ctx, state_default_scope)
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.onboard_host_self_signed",
+                    return_value=Ok(MOCK_HOST_RESULT),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.create_secrets_file",
+                    return_value=Ok(SecretsFileResult(path=Path("/tmp/s.yaml"), encrypted=False)),
+                ),
+            ):
+                config = OnboardConfig(
+                    namespace="test",
+                    hostname="myhost",
+                    role_name="admin",
+                )
+                result = onboard(ctx, config)
+
+            assert isinstance(result, Ok)
+            assert result.value.region == "ap-southeast-2"
+            assert result.value.namespace == "test"
+
+    def test_result_uses_per_scope_trust_anchor(
+        self, aws_credentials, temp_xdg_dirs, state_multi_scope: State
+    ) -> None:
+        """With a scoped role, result.trust_anchor_arn must match that scope's TA."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_state_in_aws(ctx, state_multi_scope)
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.onboard_host_self_signed",
+                    return_value=Ok(MOCK_HOST_RESULT),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.create_secrets_file",
+                    return_value=Ok(SecretsFileResult(path=Path("/tmp/s.yaml"), encrypted=False)),
+                ),
+            ):
+                config = OnboardConfig(
+                    namespace="test",
+                    hostname="myhost",
+                    role_name="cert-manager",
+                )
+                result = onboard(ctx, config)
+
+            assert isinstance(result, Ok)
+            assert "ta-certmgr" in str(result.value.trust_anchor_arn)
+            assert "ta-default" not in str(result.value.trust_anchor_arn)

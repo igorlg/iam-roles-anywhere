@@ -17,7 +17,7 @@ from iam_ra_cli.lib.errors import (
     StateSaveError,
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
-from iam_ra_cli.models import CAMode, Host
+from iam_ra_cli.models import Arn, CAMode, Host
 from iam_ra_cli.operations.host import (
     HostError,
     onboard_host_pca,
@@ -59,10 +59,21 @@ class OnboardConfig:
 
 @dataclass(frozen=True)
 class OnboardResult:
-    """Result of onboard workflow."""
+    """Result of onboard workflow.
+
+    Carries everything the CLI needs to guide the user through their
+    post-onboard setup (Nix config, AWS CLI verification, etc.), sourced
+    from state during the workflow so the CLI layer doesn't need to reach
+    back into state itself.
+    """
 
     host: Host
     secrets_file: SecretsFileResult | None
+    namespace: str
+    region: str
+    trust_anchor_arn: Arn
+    profile_arn: Arn
+    role_arn: Arn
 
 
 def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, OnboardError]:
@@ -179,7 +190,17 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
             case Ok(result):
                 secrets_result = result
 
-    return Ok(OnboardResult(host=new_host, secrets_file=secrets_result))
+    return Ok(
+        OnboardResult(
+            host=new_host,
+            secrets_file=secrets_result,
+            namespace=config.namespace,
+            region=ctx.region,
+            trust_anchor_arn=scope_ca.trust_anchor_arn,
+            profile_arn=role.profile_arn,
+            role_arn=role.role_arn,
+        )
+    )
 
 
 def offboard(
