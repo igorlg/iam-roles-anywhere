@@ -22,9 +22,12 @@ Parameters:
   SessionDuration:
     Type: Number
     Default: 3600
-    MinValue: 900
+    MinValue: 3600
     MaxValue: 43200
-    Description: IAM session duration in seconds
+    Description: >-
+      IAM session duration in seconds. Must be at least 3600 because it is used
+      for AWS::IAM::Role.MaxSessionDuration, which AWS requires to be >= 3600.
+      The same value is used for AWS::RolesAnywhere::Profile.DurationSeconds.
 
 Outputs:
   Version:
