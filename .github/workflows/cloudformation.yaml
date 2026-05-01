@@ -12,6 +12,7 @@ on:
       - 'src/iam_ra_cli/data/cloudformation/**'
       - 'pyproject.toml'
       - 'uv.lock'
+      - '.github/workflows/cloudformation.yaml'
 
 jobs:
   validate:
