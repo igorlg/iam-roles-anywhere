@@ -75,7 +75,7 @@ lock:
 
 # Lint CloudFormation templates
 cfn-lint:
-    cfn-lint src/iam_ra_cli/data/cloudformation/*.yaml
+    uv run cfn-lint src/iam_ra_cli/data/cloudformation/*.yaml
 
 # ===================
 # VERSIONING

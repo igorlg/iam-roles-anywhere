@@ -134,6 +134,7 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
                 str(scope_ca.pca_arn),
                 bucket_name,
                 config.validity_days,
+                scope=scope,
             ):
                 case Err() as e:
                     return e

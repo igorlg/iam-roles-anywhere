@@ -21,6 +21,11 @@ from iam_ra_cli.lib.errors import (
     K8sWorkloadAlreadyExistsError,
     K8sWorkloadNotFoundError,
     NotInitializedError,
+    PCADescribeError,
+    PCAGetCertError,
+    PCAIssueCertError,
+    PCANotActiveError,
+    PCATimeoutError,
     RoleAlreadyExistsError,
     RoleInUseError,
     RoleNotFoundError,
@@ -240,6 +245,56 @@ class TestFormatSecretsErrors:
         result = _format_error(error)
         assert "host.yaml" in result
         assert "already exists" in result
+
+
+class TestFormatPCAErrors:
+    """Tests for PCA error formatting."""
+
+    def test_pca_describe_error(self) -> None:
+        error = PCADescribeError(
+            pca_arn="arn:aws:acm-pca:ap-southeast-2:123:certificate-authority/abc",
+            reason="Access denied",
+        )
+        result = _format_error(error)
+        assert "abc" in result
+        assert "Access denied" in result
+
+    def test_pca_not_active_error(self) -> None:
+        error = PCANotActiveError(
+            pca_arn="arn:aws:acm-pca:ap-southeast-2:123:certificate-authority/abc",
+            status="PENDING_CERTIFICATE",
+        )
+        result = _format_error(error)
+        assert "abc" in result
+        assert "PENDING_CERTIFICATE" in result
+        assert "ACTIVE" in result  # should tell user what state is expected
+
+    def test_pca_issue_cert_error(self) -> None:
+        error = PCAIssueCertError(
+            pca_arn="arn:aws:acm-pca:ap-southeast-2:123:certificate-authority/abc",
+            reason="MalformedCSRException",
+        )
+        result = _format_error(error)
+        assert "abc" in result
+        assert "MalformedCSRException" in result
+
+    def test_pca_get_cert_error(self) -> None:
+        error = PCAGetCertError(
+            pca_arn="arn:aws:acm-pca:ap-southeast-2:123:certificate-authority/abc",
+            certificate_arn="arn:aws:acm-pca:ap-southeast-2:123:certificate-authority/abc/certificate/xyz",
+            reason="Not found",
+        )
+        result = _format_error(error)
+        assert "Not found" in result
+
+    def test_pca_timeout_error(self) -> None:
+        error = PCATimeoutError(
+            pca_arn="arn:aws:acm-pca:ap-southeast-2:123:certificate-authority/abc",
+            certificate_arn="arn:aws:acm-pca:ap-southeast-2:123:certificate-authority/abc/certificate/xyz",
+        )
+        result = _format_error(error)
+        assert "abc" in result
+        assert "timeout" in result.lower() or "timed out" in result.lower()
 
 
 class TestFormatUnknownError:

@@ -17,6 +17,18 @@ class KeyPair:
     private_key: str
 
 
+@dataclass(frozen=True)
+class HostKeyAndCsr:
+    """Host private key and CSR (Certificate Signing Request).
+
+    Used when the host certificate must be signed by an external CA
+    (e.g., ACM Private CA via IssueCertificate API) rather than locally.
+    """
+
+    private_key_pem: str
+    csr_pem: str
+
+
 def generate_ca(
     common_name: str = "IAM Roles Anywhere CA",
     validity_years: int = 10,
@@ -165,3 +177,47 @@ def generate_host_cert(
     ).decode()
 
     return KeyPair(certificate=cert_pem, private_key=key_pem)
+
+
+def generate_host_keypair_and_csr(hostname: str) -> HostKeyAndCsr:
+    """Generate a host private key and CSR for signing by an external CA.
+
+    Use this when the host certificate will be signed by ACM Private CA
+    (not locally). The resulting CSR is submitted to PCA's IssueCertificate
+    API; the returned private key stays with the caller.
+
+    Args:
+        hostname: Host identifier (becomes CSR CN)
+
+    Returns:
+        HostKeyAndCsr with PEM-encoded private key and CSR.
+    """
+    # Generate EC P-256 key (same algorithm as self-signed host certs)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+
+    # Build CSR
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(
+            x509.Name(
+                [
+                    x509.NameAttribute(NameOID.COMMON_NAME, hostname),
+                ]
+            )
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=False,
+        )
+        .sign(private_key, hashes.SHA256())
+    )
+
+    # Serialize to PEM
+    csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+    key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+    return HostKeyAndCsr(private_key_pem=key_pem, csr_pem=csr_pem)

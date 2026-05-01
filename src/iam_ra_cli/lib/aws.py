@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import boto3
 
 if TYPE_CHECKING:
+    from mypy_boto3_acm_pca import ACMPCAClient
     from mypy_boto3_cloudformation import CloudFormationClient
     from mypy_boto3_s3 import S3Client
     from mypy_boto3_secretsmanager import SecretsManagerClient
@@ -64,6 +65,11 @@ class AwsContext:
     def sts(self) -> STSClient:
         """STS client."""
         return self.session.client("sts")
+
+    @cached_property
+    def acm_pca(self) -> ACMPCAClient:
+        """ACM Private CA client."""
+        return self.session.client("acm-pca")
 
     @cached_property
     def account_id(self) -> str:
