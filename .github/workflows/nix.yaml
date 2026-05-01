@@ -1,10 +1,9 @@
-# CI - Nix flake checks and builds
+# Nix - flake checks, package builds, format check
 #
-# Runs on every push to feature branches for fast feedback.
-# PRs only add PR-specific checks (version label) via release.yaml.
+# Runs on every push to feature branches when Nix-related files change.
 # Darwin is excluded due to lack of GitHub-hosted macOS runners with Nix.
 
-name: CI
+name: Nix
 
 on:
   push:

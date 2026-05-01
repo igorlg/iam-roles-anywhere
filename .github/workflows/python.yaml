@@ -1,9 +1,10 @@
-# CLI - Test Python CLI independently
+# Python - pytest, mypy, ruff, CLI smoke test
 #
-# Runs on every push to feature branches (path-filtered).
-# Tests: pytest, mypy, ruff, CLI load check, Nix build.
+# Runs on every push to feature branches when Python source, tests, deps,
+# or the Python version changes. Nix package build coverage is handled by
+# nix.yaml (which also triggers on src/**) rather than duplicated here.
 
-name: CLI
+name: Python
 
 on:
   push:
@@ -14,7 +15,8 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'uv.lock'
-      - '.github/workflows/cli.yaml'
+      - '.python-version'
+      - '.github/workflows/python.yaml'
 
 jobs:
   test:
@@ -45,20 +47,3 @@ jobs:
 
       - name: Verify CLI loads
         run: uv run iam-ra --help
-
-  # Ensure the Nix package also builds correctly
-  nix-build:
-    name: Nix Build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v22
-
-      - name: Setup Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v13
-
-      - name: Build CLI
-        run: nix build .#iam-ra-cli --print-build-logs

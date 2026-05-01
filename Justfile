@@ -115,6 +115,9 @@ clean:
     rm -rf .venv
     rm -rf *.egg-info
     rm -rf src/*.egg-info
+    rm -rf .mypy_cache
+    rm -rf .pytest_cache
+    rm -rf .ruff_cache
 
 # Garbage collect Nix store
 gc:
