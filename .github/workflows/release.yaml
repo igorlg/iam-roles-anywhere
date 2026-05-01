@@ -121,7 +121,7 @@ jobs:
         if: steps.pr.outputs.skip != 'true'
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version-file: .python-version
 
       - name: Calculate new version
         if: steps.pr.outputs.skip != 'true'
