@@ -123,6 +123,10 @@ jobs:
         with:
           python-version-file: .python-version
 
+      - name: Install uv
+        if: steps.pr.outputs.skip != 'true'
+        uses: astral-sh/setup-uv@v7
+
       - name: Calculate new version
         if: steps.pr.outputs.skip != 'true'
         id: version
@@ -156,10 +160,21 @@ jobs:
         run: |
           echo "${{ steps.version.outputs.version }}" > VERSION
           python scripts/sync-version.py
-          
+
+      # Release safety gate: verify every version-tracking location agrees
+      # BEFORE we commit + push + tag. If sync-version.py has a bug, or if
+      # uv.lock drifted, we abort here rather than publishing a broken
+      # release artifact that's hard to roll back.
+      - name: Verify all versions in sync
+        if: steps.pr.outputs.skip != 'true'
+        run: python scripts/sync-version.py --check
+
+      - name: Commit and push version bump
+        if: steps.pr.outputs.skip != 'true'
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add VERSION pyproject.toml src/iam_ra_cli/__init__.py src/iam_ra_cli/data/cloudformation/*.yaml
+          git add VERSION pyproject.toml src/iam_ra_cli/__init__.py src/iam_ra_cli/data/cloudformation/*.yaml uv.lock
           git commit -m "chore: bump version to ${{ steps.version.outputs.version }}"
           git push
 
