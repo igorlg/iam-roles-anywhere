@@ -26,6 +26,11 @@ from iam_ra_cli.lib.errors import (
     K8sWorkloadAlreadyExistsError,
     K8sWorkloadNotFoundError,
     NotInitializedError,
+    PCADescribeError,
+    PCAGetCertError,
+    PCAIssueCertError,
+    PCANotActiveError,
+    PCATimeoutError,
     RoleAlreadyExistsError,
     RoleInUseError,
     RoleNotFoundError,
@@ -205,6 +210,31 @@ def _format_error(error: Any) -> str:
 
         case SecretsFileExistsError(path):
             return f"Secrets file already exists: {path}"
+
+        case PCADescribeError(pca_arn, reason):
+            return f"Failed to describe ACM Private CA '{pca_arn}': {reason}"
+
+        case PCANotActiveError(pca_arn, status):
+            return (
+                f"ACM Private CA '{pca_arn}' is in status '{status}', but must be "
+                f"ACTIVE to issue certificates. Activate it in the AWS console or via "
+                f"'aws acm-pca update-certificate-authority --status ACTIVE --certificate-authority-arn {pca_arn}'."
+            )
+
+        case PCAIssueCertError(pca_arn, reason):
+            return f"Failed to issue certificate from ACM Private CA '{pca_arn}': {reason}"
+
+        case PCAGetCertError(pca_arn, certificate_arn, reason):
+            return (
+                f"Failed to retrieve issued certificate '{certificate_arn}' from "
+                f"ACM Private CA '{pca_arn}': {reason}"
+            )
+
+        case PCATimeoutError(pca_arn, certificate_arn):
+            return (
+                f"Timed out waiting for ACM Private CA '{pca_arn}' to issue certificate "
+                f"'{certificate_arn}'. The request may still be in progress - check the AWS console."
+            )
 
         case _:
             return str(error)

@@ -257,6 +257,54 @@ iam-ra k8s teardown prod-cluster
 
 See [docs/KUBERNETES.md](docs/KUBERNETES.md) for detailed Kubernetes documentation.
 
+## ACM Private CA Mode
+
+When initialized with `--ca-mode pca-new` or `--ca-mode pca-existing`, host
+certificates are issued by an AWS Private CA rather than signed locally.
+
+### How it works
+
+Because the CA's private key lives in AWS (in an HSM), `iam-ra` cannot sign
+host certificates itself. Instead, host onboarding submits a CSR to the PCA:
+
+1. `iam-ra host onboard` generates an EC P-256 keypair and a CSR locally
+2. The CSR is submitted via `acm-pca:IssueCertificate`
+3. The signed certificate is retrieved via `acm-pca:GetCertificate`
+4. Certificate and private key are uploaded to S3 and wired into Secrets Manager
+
+The CSR template used is
+[`EndEntityClientAuthCertificate/V1`](https://docs.aws.amazon.com/privateca/latest/userguide/UsingTemplates.html#EndEntityClientAuthCertificate-V1),
+which produces an end-entity certificate with the Client Authentication EKU
+(required by IAM Roles Anywhere) and **passes through the CSR's subject** - so
+the certificate CN will match the hostname you specify on the CLI.
+
+### Prerequisites for pca-existing
+
+If you point `iam-ra init` at an existing PCA (`--pca-arn`), that CA must be in
+`ACTIVE` status. A new Private CA starts in `PENDING_CERTIFICATE` and must be
+activated with a signed CA certificate before it can issue end-entity certs.
+
+Check status:
+
+```bash
+aws acm-pca describe-certificate-authority \
+  --certificate-authority-arn arn:aws:acm-pca:...:certificate-authority/... \
+  --query 'CertificateAuthority.Status'
+```
+
+Expected output: `"ACTIVE"`. If it's anything else (e.g. `PENDING_CERTIFICATE`,
+`DISABLED`), `iam-ra host onboard` will fail fast with a clear error message
+before attempting to issue the certificate.
+
+### Required IAM permissions
+
+In addition to the base permissions, the admin running `iam-ra host onboard`
+needs:
+
+- `acm-pca:DescribeCertificateAuthority`
+- `acm-pca:IssueCertificate`
+- `acm-pca:GetCertificate`
+
 ## Module Configuration
 
 ### NixOS/Darwin (System Module)
@@ -432,6 +480,29 @@ openssl x509 -in /run/secrets/iam-ra/cert -noout -dates -subject
 
 # Verify trust anchor matches
 aws rolesanywhere get-trust-anchor --trust-anchor-id ...
+```
+
+### "ACM Private CA is in status 'PENDING_CERTIFICATE'"
+
+The PCA you're using must be activated before it can issue host certificates.
+A CA in `PENDING_CERTIFICATE` has been created but has no signed CA certificate
+installed yet.
+
+```bash
+# If you created the CA via iam-ra init --ca-mode pca-new, CloudFormation
+# should have activated it. Verify:
+aws acm-pca describe-certificate-authority \
+  --certificate-authority-arn <arn> \
+  --query 'CertificateAuthority.Status'
+
+# If pca-existing: you need to activate it yourself. For a ROOT CA:
+aws acm-pca get-certificate-authority-csr \
+  --certificate-authority-arn <arn> \
+  --output text > ca.csr
+# ... sign ca.csr with your root/parent CA, then:
+aws acm-pca import-certificate-authority-certificate \
+  --certificate-authority-arn <arn> \
+  --certificate fileb://ca.crt
 ```
 
 ### Test credentials manually

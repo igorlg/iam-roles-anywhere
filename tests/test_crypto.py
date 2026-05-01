@@ -5,7 +5,12 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import ExtendedKeyUsageOID
 
-from iam_ra_cli.lib.crypto import KeyPair, generate_ca, generate_host_cert
+from iam_ra_cli.lib.crypto import (
+    KeyPair,
+    generate_ca,
+    generate_host_cert,
+    generate_host_keypair_and_csr,
+)
 
 
 class TestGenerateCA:
@@ -182,3 +187,73 @@ class TestGenerateHostCert:
         cert2 = x509.load_pem_x509_certificate(keypair2.certificate.encode())
 
         assert cert1.serial_number != cert2.serial_number
+
+
+class TestGenerateHostKeypairAndCSR:
+    """Tests for host keypair and CSR generation (used with ACM PCA)."""
+
+    def test_returns_pem_private_key(self) -> None:
+        result = generate_host_keypair_and_csr(hostname="web1")
+
+        assert result.private_key_pem.startswith("-----BEGIN EC PRIVATE KEY-----")
+
+    def test_returns_pem_csr(self) -> None:
+        result = generate_host_keypair_and_csr(hostname="web1")
+
+        assert result.csr_pem.startswith("-----BEGIN CERTIFICATE REQUEST-----")
+
+    def test_csr_has_correct_cn(self) -> None:
+        result = generate_host_keypair_and_csr(hostname="my-custom-host")
+
+        csr = x509.load_pem_x509_csr(result.csr_pem.encode())
+        cn = csr.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)[0]
+        assert cn.value == "my-custom-host"
+
+    def test_csr_has_client_auth_eku(self) -> None:
+        result = generate_host_keypair_and_csr(hostname="web1")
+
+        csr = x509.load_pem_x509_csr(result.csr_pem.encode())
+        eku = csr.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+        assert ExtendedKeyUsageOID.CLIENT_AUTH in eku.value
+
+    def test_csr_signature_is_valid(self) -> None:
+        """CSR must be signed by the generated private key (verifies integrity)."""
+        result = generate_host_keypair_and_csr(hostname="web1")
+
+        csr = x509.load_pem_x509_csr(result.csr_pem.encode())
+        # Raises InvalidSignature if the CSR's signature doesn't match its public key
+        assert csr.is_signature_valid
+
+    def test_csr_public_key_matches_private_key(self) -> None:
+        """The public key in the CSR must correspond to the returned private key."""
+        result = generate_host_keypair_and_csr(hostname="web1")
+
+        csr = x509.load_pem_x509_csr(result.csr_pem.encode())
+        private_key = serialization.load_pem_private_key(
+            result.private_key_pem.encode(), password=None
+        )
+
+        csr_pub_pem = csr.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        priv_pub_pem = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        assert csr_pub_pem == priv_pub_pem
+
+    def test_private_key_is_ec_p256(self) -> None:
+        result = generate_host_keypair_and_csr(hostname="web1")
+
+        key = serialization.load_pem_private_key(result.private_key_pem.encode(), password=None)
+        assert hasattr(key, "curve")
+        assert key.curve.name == "secp256r1"
+
+    def test_each_call_produces_unique_keypair(self) -> None:
+        """Repeated calls must generate fresh keypairs - never reuse keys."""
+        result1 = generate_host_keypair_and_csr(hostname="web1")
+        result2 = generate_host_keypair_and_csr(hostname="web1")  # same hostname
+
+        assert result1.private_key_pem != result2.private_key_pem
+        assert result1.csr_pem != result2.csr_pem

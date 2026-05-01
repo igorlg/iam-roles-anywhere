@@ -239,6 +239,57 @@ class K8sUnsupportedCAModeError:
 
 
 # =============================================================================
+# PCA Errors
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class PCADescribeError:
+    """Failed to describe ACM PCA."""
+
+    pca_arn: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class PCANotActiveError:
+    """ACM PCA is not in ACTIVE status - cannot issue certificates.
+
+    Possible statuses: CREATING, PENDING_CERTIFICATE, DISABLED, DELETED,
+    EXPIRED, FAILED. A PCA must be ACTIVE before it can issue end-entity
+    certificates.
+    """
+
+    pca_arn: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class PCAIssueCertError:
+    """Failed to issue certificate via ACM PCA."""
+
+    pca_arn: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class PCAGetCertError:
+    """Failed to retrieve issued certificate from ACM PCA."""
+
+    pca_arn: str
+    certificate_arn: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class PCATimeoutError:
+    """Timed out waiting for ACM PCA to issue certificate."""
+
+    pca_arn: str
+    certificate_arn: str
+
+
+# =============================================================================
 # State Errors
 # =============================================================================
 
@@ -276,6 +327,11 @@ type HostError = (
     | S3ReadError
     | S3WriteError
     | StackDeployError
+    | PCADescribeError
+    | PCANotActiveError
+    | PCAIssueCertError
+    | PCAGetCertError
+    | PCATimeoutError
 )
 type OffboardError = NotInitializedError | HostNotFoundError | StackDeleteError
 type SecretsError = SecretsManagerReadError | SOPSEncryptError | SecretsFileExistsError

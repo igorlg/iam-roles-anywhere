@@ -12,3 +12,5 @@ tmp/
 __pycache__/
 .egg-info/
 
+# Ignore OpenCode
+.opencode/
