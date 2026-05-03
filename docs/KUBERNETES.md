@@ -8,7 +8,7 @@ IAM Roles Anywhere enables workloads outside of AWS to obtain temporary AWS cred
 
 ### Architecture
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                         Kubernetes Cluster                                │
 │                                                                          │
@@ -56,16 +56,19 @@ IAM Roles Anywhere enables workloads outside of AWS to obtain temporary AWS cred
 ## Prerequisites
 
 1. **IAM-RA initialized** with self-signed CA mode:
+
    ```bash
    iam-ra init --ca-mode self-signed
    ```
 
 2. **At least one role created**:
+
    ```bash
    iam-ra role create admin --policy arn:aws:iam::aws:policy/AdministratorAccess
    ```
 
 3. **cert-manager installed** in your cluster:
+
    ```bash
    kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.0/cert-manager.yaml
    ```
@@ -82,6 +85,7 @@ iam-ra k8s setup prod-cluster | kubectl apply -f -
 ```
 
 This creates:
+
 - `iam-ra-ca` Secret containing your CA certificate
 - `iam-ra` Issuer that cert-manager uses to sign certificates
 
@@ -95,6 +99,7 @@ iam-ra k8s onboard payment-service --role admin --cluster prod-cluster | kubectl
 ```
 
 This creates:
+
 - `payment-service-cert` Certificate (cert-manager will issue it)
 - `payment-service-iam-ra-config` ConfigMap with ARNs
 - `payment-service-sample` Pod (sample, replace with your deployment)
@@ -321,6 +326,7 @@ iam-ra k8s list
 1. **Certificate Duration**: Default is 24 hours. cert-manager renews 5 minutes before expiry. Adjust with `--duration-hours`.
 
 2. **Namespace Isolation**: Consider using separate K8s namespaces for different security boundaries:
+
    ```bash
    iam-ra k8s setup prod --k8s-namespace iam-ra-system
    iam-ra k8s onboard api --cluster prod --k8s-namespace api-ns
@@ -335,6 +341,7 @@ iam-ra k8s list
 ### Certificate not issued
 
 Check cert-manager logs and Certificate status:
+
 ```bash
 kubectl describe certificate payment-service-cert
 kubectl logs -n cert-manager deploy/cert-manager
@@ -343,11 +350,13 @@ kubectl logs -n cert-manager deploy/cert-manager
 ### Credentials not working
 
 Check the sidecar logs:
+
 ```bash
 kubectl logs payment-service-sample -c iam-ra-sidecar
 ```
 
 Verify the Trust Anchor trusts your CA:
+
 ```bash
 aws rolesanywhere get-trust-anchor --trust-anchor-id <id>
 ```
@@ -355,6 +364,7 @@ aws rolesanywhere get-trust-anchor --trust-anchor-id <id>
 ### "CA mode not supported"
 
 K8s integration only works with self-signed CA mode. Re-initialize:
+
 ```bash
 iam-ra destroy --yes
 iam-ra init --ca-mode self-signed
@@ -373,6 +383,7 @@ iam-ra init --ca-mode self-signed
 | Certificate rotation | N/A | Automatic (cert-manager) |
 
 Use IAM Roles Anywhere when:
+
 - You have on-prem or self-managed K8s clusters
 - You need to avoid OIDC complexity
 - You want session tags for fine-grained access control

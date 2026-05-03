@@ -1,0 +1,28 @@
+# lychee - broken link checker config
+# See: https://github.com/lycheeverse/lychee/blob/lychee-v0.23.0/lychee.example.toml
+
+# Accept these status codes as "alive" (auth-walled pages, rate limits)
+accept = ["200..=299", "300..=399", "401", "403", "429"]
+
+# Retry transient failures
+max_retries = 2
+retry_wait_time = 2
+timeout = 20
+
+# Exclude patterns (URL regex)
+exclude = [
+  # AWS documentation uses JS-rendered anchors that break naive checks
+  '^https://docs\.aws\.amazon\.com/.*#',
+  # Placeholder ARNs we use in examples
+  '^arn:aws:',
+  # Example/placeholder URLs inside the repo
+  '^https?://example\.com',
+]
+
+# Skip mail addresses (we don't have any real ones to check)
+include_mail = false
+
+# Don't follow localhost/loopback links
+exclude_loopback = true
+
+user_agent = "lychee/iam-ra-docs-check"

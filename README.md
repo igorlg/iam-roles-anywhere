@@ -9,6 +9,7 @@ This flake provides three components:
 ### 1. Nix Modules (Runtime - installed on hosts)
 
 Configures hosts to **use** IAM Roles Anywhere for AWS authentication:
+
 - `aws-signing-helper` - credential process for IAM Roles Anywhere
 - `~/.aws/config` - configured with `credential_process`
 - **Multi-profile support** - one host can assume multiple roles
@@ -17,6 +18,7 @@ Configures hosts to **use** IAM Roles Anywhere for AWS authentication:
 ### 2. `iam-ra` CLI (Admin Tool)
 
 A CLI for **managing** IAM Roles Anywhere infrastructure:
+
 - Initialize AWS infrastructure (CloudFormation stacks)
 - Create roles with Roles Anywhere profiles
 - Onboard hosts (generate certificates, deploy stacks, create SOPS files)
@@ -25,11 +27,12 @@ A CLI for **managing** IAM Roles Anywhere infrastructure:
 ### 3. Kubernetes Integration
 
 Generate manifests for Kubernetes workloads to use IAM Roles Anywhere:
+
 - cert-manager Issuer and Certificate resources
 - Sidecar-based credential delivery
 - Works with any K8s cluster (on-prem, self-managed, EKS)
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                        ADMIN WORKSTATION                        │
 │  ┌───────────────┐                                              │
@@ -82,6 +85,7 @@ iam-ra host onboard myhost --role admin
 ```
 
 This creates:
+
 - Host CloudFormation stack with certificate in Secrets Manager
 - SOPS-encrypted secrets file: `secrets/hosts/myhost/iam-ra.yaml`
 
@@ -186,7 +190,7 @@ iam-ra --help
 
 ## CLI Commands
 
-```
+```text
 iam-ra [OPTIONS] COMMAND
 
 Commands:
@@ -398,7 +402,7 @@ programs.iamRolesAnywhere.certificate = {
 
 ## Architecture
 
-```
+```text
 AWS Account
 ├── CloudFormation Stacks
 │   ├── iam-ra-{namespace}-init     (S3, KMS, Lambdas)
@@ -426,7 +430,7 @@ Host
 
 ## Directory Structure
 
-```
+```text
 iam-roles-anywhere/
 ├── flake.nix
 ├── README.md

@@ -13,7 +13,7 @@
 
 ## Layer Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                    CLI Layer (commands/)                │
 │  Parse args, create Session, call workflows, print     │
@@ -87,6 +87,7 @@ def flat_map(result: Result[T, E], f: Callable[[T], Result[U, E]]) -> Result[U, 
 ```
 
 Usage:
+
 ```python
 def deploy_stack(...) -> Result[StackOutputs, DeployError]:
     ...
@@ -152,6 +153,7 @@ class AwsContext:
 ```
 
 Created once in CLI:
+
 ```python
 @click.command()
 @click.option("--region", "-r", default="ap-southeast-2")
@@ -716,7 +718,7 @@ def _print_error(error) -> None:
 
 ## File Structure
 
-```
+```text
 iam_ra_cli/
 ├── __init__.py
 ├── main.py                    # CLI entry point, registers commands
@@ -770,7 +772,7 @@ iam_ra_cli/
 
 ## CLI Command Structure
 
-```
+```text
 iam-ra
 ├── init                       # Initialize infrastructure + CA
 ├── destroy                    # Tear down everything

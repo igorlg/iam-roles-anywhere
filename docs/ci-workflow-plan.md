@@ -36,14 +36,17 @@ This plan proposes a restructure to fix all three.
 ### Problems concretely
 
 A **docs-only change** (`README.md`) currently triggers:
+
 - `ci.yaml`: Nix Check x2, Build x2, Format Check = **5 jobs**
 
 A **`src/**/*.py` change** currently triggers:
+
 - `ci.yaml`: Nix Check x2, Build x2, Format Check = 5 jobs
 - `cli.yaml`: Python Tests + Nix Build = 2 jobs
 - Total: **7 jobs**, with 3 redundant Nix builds.
 
 A **`.nix` or `flake.lock` change** currently triggers:
+
 - `ci.yaml`: full 5 jobs
 - `cli.yaml`: doesn't trigger (paths don't match) — even though Nix changes affect the package build.
 
@@ -67,21 +70,25 @@ A **`.nix` or `flake.lock` change** currently triggers:
 ### Path filter triggers after refactor
 
 A **docs-only change**:
+
 - `docs.yaml`: markdown + links + spell = **3 jobs**
 - Nothing else triggers.
 - Savings: -5 Nix jobs previously run for no reason.
 
 A **`src/**/*.py` change**:
+
 - `nix.yaml`: check x2, build x2, format = 5 jobs (src/** matches)
 - `python.yaml`: test = 1 job
 - Total: **6 jobs** (down from 7; eliminated duplicate Nix build).
 
 A **`.nix` or `flake.lock` change**:
+
 - `nix.yaml`: 5 jobs
 - Nothing else triggers.
 - **New coverage**: previously `flake.lock` changes didn't trigger `cli.yaml`'s nix-build.
 
 A **CFN-only change**:
+
 - `cloudformation.yaml`: validate
 - `nix.yaml`: check + build (since `src/**` matches CFN paths)
 - Acceptable — CFN templates are embedded in the Nix package, so validating the build still makes sense.
@@ -105,6 +112,7 @@ A **CFN-only change**:
 ### Strictness decision
 
 Per earlier discussion: block style + internal links; warn external. Rationale:
+
 - Internal link breakage = we introduced it, always fixable.
 - External link breakage = could be temporary (their server's down), network flakiness. Warning keeps the PR unblocked.
 
@@ -115,9 +123,10 @@ External checks run as a separate job with `continue-on-error: true` so CI shows
 **Keep both PR-time build and `verify-build`**.
 
 Rationale:
+
 - PR build validates the code as written.
 - `verify-build` validates the *version-bump commit* the release workflow itself creates (sync-version.py ran + uv.lock regenerated + commit pushed).
-- After [#20](../.github/pull/20), `sync-version.py --check` already catches most bump-induced breakage pre-push, but `verify-build` remains the last line of defence for "the Nix package itself fails to build after the bump". Rare, but the cost is one cached-friendly build on ubuntu-latest.
+- After [#20](https://github.com/igorlg/iam-roles-anywhere/pull/20), `sync-version.py --check` already catches most bump-induced breakage pre-push, but `verify-build` remains the last line of defence for "the Nix package itself fails to build after the bump". Rare, but the cost is one cached-friendly build on ubuntu-latest.
 - Artifact reuse between PR and verify-build is not pursued: merge commits break SHA-based cache keys, and magic-nix-cache already deduplicates most of the work.
 
 After removing the redundant `cli.yaml` nix-build: a Python change triggers 2 builds (ci x2 archs + post-release verify). That's the floor without complex cache-key engineering.
