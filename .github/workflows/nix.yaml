@@ -10,7 +10,7 @@ on:
     branches-ignore:
       - main
     paths:
-      # Nix-level files
+      # Nix-level files (includes examples/**/*.nix via the glob)
       - '**/*.nix'
       - 'flake.lock'
       # Files the Nix package build reads (via uv2nix)
@@ -19,8 +19,6 @@ on:
       - 'uv.lock'
       - '.python-version'
       - 'VERSION'
-      # Nix-rendered content (checks assert CLI loads)
-      - 'examples/**'
       # Self-trigger on workflow changes
       - '.github/workflows/nix.yaml'
 
