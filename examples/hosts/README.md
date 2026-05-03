@@ -15,17 +15,20 @@ This directory contains example Nix configurations for hosts using IAM Roles Any
 ## Prerequisites
 
 1. Initialize IAM-RA:
+
    ```bash
    iam-ra init
    ```
 
 2. Create roles:
+
    ```bash
    iam-ra role create admin --policy arn:aws:iam::aws:policy/AdministratorAccess
    iam-ra role create readonly --policy arn:aws:iam::aws:policy/ReadOnlyAccess
    ```
 
 3. Onboard the host:
+
    ```bash
    iam-ra host onboard myhost --role admin
    ```

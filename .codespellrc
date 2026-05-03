@@ -1,0 +1,11 @@
+[codespell]
+# This config applies whenever codespell is invoked with --config .codespellrc.
+# Scope (which files are scanned) is controlled by the invocation args in
+# .github/workflows/docs.yaml - not here.
+
+# Files to skip even if they appear in the invocation scope (binaries, locks)
+skip = *.lock,*.min.js,*.svg,.git,.venv,.direnv,node_modules,result,dist,build,uv.lock,flake.lock
+
+# Project-specific terms that look like misspellings to codespell's default
+# dictionary. Keep alphabetical; one per entry.
+ignore-words-list = crate,iam,ra

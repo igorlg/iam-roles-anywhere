@@ -1,0 +1,108 @@
+# Docs - markdown linting, link checking, spell checking
+#
+# Runs on every push to feature branches when any documentation file changes.
+# Does not run on code or Nix changes (those are validated by python.yaml /
+# nix.yaml).
+#
+# Strictness (per docs/ci-workflow-plan.md):
+#   - markdownlint:        block
+#   - lychee internal:     block
+#   - lychee external:     warn only (network flakiness)
+#   - codespell (docs):    block
+
+name: Docs
+
+on:
+  push:
+    branches-ignore:
+      - main
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - 'examples/**/*.md'
+      - '.markdownlint.json'
+      - '.lychee.toml'
+      - '.codespellrc'
+      - '.github/workflows/docs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  markdownlint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run markdownlint-cli2
+        uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: |
+            **/*.md
+            !result
+            !result-*
+            !tmp
+            !.direnv
+            !.venv
+            !.opencode
+            !node_modules
+
+  links-internal:
+    name: Internal Links
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check internal links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # Only check local paths + anchors. External URLs handled by
+          # the links-external job below.
+          args: >-
+            --config .lychee.toml
+            --offline
+            --no-progress
+            --verbose
+            '**/*.md'
+          fail: true
+
+  links-external:
+    name: External Links
+    runs-on: ubuntu-latest
+    # Warn-only: network flakiness should not block PRs.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check external links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --config .lychee.toml
+            --no-progress
+            --scheme https
+            --scheme http
+            '**/*.md'
+          fail: true
+
+  codespell:
+    name: Spell Check (docs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install codespell
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run codespell on docs
+        run: |
+          uvx codespell --config .codespellrc \
+            README.md \
+            docs/ \
+            examples/
