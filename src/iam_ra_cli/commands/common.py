@@ -14,6 +14,7 @@ import click
 
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    AccountMismatchError,
     CAKeyNotFoundError,
     CannotRemoveLastRoleError,
     CAScopeAlreadyExistsError,
@@ -160,6 +161,14 @@ def _format_error(error: Any) -> str:
     match error:
         case NotInitializedError(namespace):
             return f"Namespace '{namespace}' is not initialized. Run 'iam-ra init' first."
+
+        case AccountMismatchError(namespace, expected_account_id, actual_account_id):
+            return (
+                f"Namespace '{namespace}' is in AWS account "
+                f"{expected_account_id}, but your current AWS credentials "
+                f"are for account {actual_account_id}. Use AWS_PROFILE or "
+                f"--profile to switch to the correct account."
+            )
 
         case RoleNotFoundError(namespace, role_name):
             return f"Role '{role_name}' not found in namespace '{namespace}'."

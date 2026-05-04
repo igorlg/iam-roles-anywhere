@@ -20,6 +20,23 @@ class NotInitializedError:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountMismatchError:
+    """The active AWS credentials are for a different account than the one
+    this namespace was initialised in.
+
+    A namespace's SSM parameter, S3 bucket, and KMS key all live in one
+    account. Running state-mutating commands with credentials for a
+    different account either fails late (access denied) or silently
+    crosses into the wrong account. This error fires at workflow entry
+    time so the user can switch profiles before anything happens.
+    """
+
+    namespace: str
+    expected_account_id: str
+    actual_account_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class StackDeployError:
     """CloudFormation stack deployment failed."""
 

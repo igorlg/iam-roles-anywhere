@@ -7,6 +7,7 @@ S3 cert path, local key path, and CloudFormation stack.
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    AccountMismatchError,
     CAError,
     CAScopeAlreadyExistsError,
     CAScopeNotFoundError,
@@ -15,6 +16,7 @@ from iam_ra_cli.lib.errors import (
     StateLoadError,
     StateSaveError,
 )
+from iam_ra_cli.lib.preflight import check_account_matches_namespace
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.models import CA, CAMode
 from iam_ra_cli.operations.ca import (
@@ -25,11 +27,21 @@ from iam_ra_cli.operations.ca import (
 )
 
 type SetupError = (
-    NotInitializedError | CAScopeAlreadyExistsError | CAError | StateLoadError | StateSaveError
+    NotInitializedError
+    | AccountMismatchError
+    | CAScopeAlreadyExistsError
+    | CAError
+    | StateLoadError
+    | StateSaveError
 )
 
 type DeleteError = (
-    NotInitializedError | CAScopeNotFoundError | StackDeleteError | StateLoadError | StateSaveError
+    NotInitializedError
+    | AccountMismatchError
+    | CAScopeNotFoundError
+    | StackDeleteError
+    | StateLoadError
+    | StateSaveError
 )
 
 type ListError = NotInitializedError | StateLoadError
@@ -70,6 +82,13 @@ def setup_ca(
         return Err(NotInitializedError(namespace))
 
     assert state.init is not None
+
+    # Fail fast if current credentials are for the wrong AWS account.
+    match check_account_matches_namespace(ctx, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
 
     # Check scope doesn't already exist
     if scope in state.cas:
@@ -140,6 +159,13 @@ def delete_scope(
 
     if not state.is_initialized:
         return Err(NotInitializedError(namespace))
+
+    # Fail fast if current credentials are for the wrong AWS account.
+    match check_account_matches_namespace(ctx, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
 
     # Check scope exists
     if scope not in state.cas:

@@ -1130,8 +1130,8 @@ class TestMigrateSopsFiles:
                     side_effect=capture,
                 ),
                 patch(
-                    "iam_ra_cli.workflows.migrate.get_secrets_path",
-                    return_value=Path("/fake/secrets/hosts/host1/iam-ra.yaml"),
+                    "iam_ra_cli.workflows.migrate.resolve_existing_secrets_path",
+                    return_value=(Path("/fake/secrets/hosts/host1/iam-ra.yaml"), False),
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.update_role_stack",
@@ -1176,8 +1176,8 @@ class TestMigrateSopsFiles:
                     side_effect=should_not_be_called,
                 ),
                 patch(
-                    "iam_ra_cli.workflows.migrate.get_secrets_path",
-                    return_value=Path("/fake/secrets/hosts/host1/iam-ra.yaml"),
+                    "iam_ra_cli.workflows.migrate.resolve_existing_secrets_path",
+                    return_value=(Path("/fake/secrets/hosts/host1/iam-ra.yaml"), False),
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.update_role_stack",
@@ -1210,8 +1210,8 @@ class TestMigrateSopsFiles:
 
             with (
                 patch(
-                    "iam_ra_cli.workflows.migrate.get_secrets_path",
-                    return_value=Path("/fake/missing/iam-ra.yaml"),
+                    "iam_ra_cli.workflows.migrate.resolve_existing_secrets_path",
+                    return_value=(Path("/fake/missing/iam-ra.yaml"), False),
                 ),
                 patch("pathlib.Path.exists", return_value=False),
                 patch(

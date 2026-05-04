@@ -29,8 +29,8 @@ from iam_ra_cli.lib.sops import (
     SOPS_SCHEMA_VERSION,
     create_secrets_yaml,
     decrypt_file,
-    get_secrets_path,
     parse_secrets_yaml,
+    resolve_existing_secrets_path,
     write_and_encrypt,
 )
 from iam_ra_cli.lib.storage.s3 import delete_object, object_exists, read_object, write_object
@@ -92,16 +92,23 @@ def _old_ca_key_local_path(namespace: str):
     return paths.data_dir() / namespace / "ca-private-key.pem"
 
 
-def _migrate_host_sops_file(hostname: str) -> bool:
+def _migrate_host_sops_file(hostname: str, namespace: str) -> bool:
     """Migrate a single host's SOPS file from v1 YAML to v2 YAML.
 
     Returns True if the file was rewritten, False if it was skipped
     (already v2 or missing). Errors during decrypt/parse/encrypt are
     logged and swallowed - a SOPS-related failure should not abort
     the overall migration.
+
+    Looks up the file via :func:`resolve_existing_secrets_path` so a
+    legacy ``iam-ra.yaml`` (pre-multi-identity) is found for the default
+    namespace. The rewrite is written back to the SAME path (legacy or
+    canonical) - this workflow only migrates the *content schema*;
+    filename migration is the separate ``iam-ra migrate sops-paths``
+    command.
     """
     try:
-        sops_path = get_secrets_path(hostname)
+        sops_path, _is_legacy = resolve_existing_secrets_path(hostname, namespace)
     except RuntimeError:
         # Can't locate flake root -> can't locate SOPS files. Skip.
         return False
@@ -368,7 +375,7 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
     #    rather than aborting the whole migrate.
     sops_files_migrated: list[str] = []
     for hostname in state.hosts:
-        if _migrate_host_sops_file(hostname):
+        if _migrate_host_sops_file(hostname, namespace):
             sops_files_migrated.append(hostname)
 
     return Ok(
