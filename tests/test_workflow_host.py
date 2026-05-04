@@ -32,9 +32,11 @@ from iam_ra_cli.workflows.host import (
     AddRoleConfig,
     OnboardConfig,
     RemoveRoleConfig,
+    RotateCertConfig,
     add_role,
     onboard,
     remove_role,
+    rotate_cert,
 )
 
 
@@ -1072,3 +1074,273 @@ class TestRemoveRoleErrors:
 
             assert isinstance(result, Err)
             assert isinstance(result.error, CannotRemoveLastRoleError)
+
+
+# =============================================================================
+# rotate_cert workflow (scenario 2 helper: renew cert, keep role list)
+# =============================================================================
+
+
+class TestRotateCertSuccess:
+    """rotate_cert issues a new cert under the host's existing scope and
+    updates Secrets Manager + SOPS in place, preserving role_names."""
+
+    def test_rotates_self_signed_cert(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """Self-signed scope: new cert signed by the existing CA key on disk."""
+        from iam_ra_cli.lib import crypto
+
+        # Pre-create a CA on disk + in S3 matching the state fixture
+        ca_kp = crypto.generate_ca(common_name="Test CA", validity_years=2)
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(
+                ctx, _state_with_existing_host(host_role_names=("admin",))
+            )
+
+            # Put the CA cert into the state's bucket (scoped path)
+            ctx.s3.put_object(
+                Bucket="test-bucket",
+                Key="test/scopes/default/ca/certificate.pem",
+                Body=ca_kp.certificate.encode("utf-8"),
+            )
+
+            # Put the CA private key where operations/ca.py expects it
+            from iam_ra_cli.lib import paths as paths_lib
+
+            ca_key_path = (
+                paths_lib.data_dir()
+                / "test"
+                / "scopes"
+                / "default"
+                / "ca-private-key.pem"
+            )
+            ca_key_path.parent.mkdir(parents=True, exist_ok=True)
+            ca_key_path.write_text(ca_kp.private_key)
+
+            # Pre-create the existing Secrets Manager secrets so rotate can
+            # update them (arn-by-name is accepted by moto's put_secret_value).
+            ctx.secrets.create_secret(
+                Name=(
+                    "arn:aws:secretsmanager:ap-southeast-2:"
+                    "123456789012:secret:cert"
+                ),
+                SecretString="OLD-CERT",
+            )
+            ctx.secrets.create_secret(
+                Name=(
+                    "arn:aws:secretsmanager:ap-southeast-2:"
+                    "123456789012:secret:key"
+                ),
+                SecretString="OLD-KEY",
+            )
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.decrypt_file",
+                    return_value="decrypted yaml",
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.parse_secrets_yaml",
+                    return_value=_mock_existing_sops(),
+                ),
+                patch("iam_ra_cli.workflows.host.write_and_encrypt") as mock_write,
+            ):
+                result = rotate_cert(
+                    ctx,
+                    RotateCertConfig(
+                        namespace="test",
+                        hostname="myhost",
+                        validity_days=90,
+                    ),
+                )
+
+            assert isinstance(result, Ok)
+            # SOPS file rewritten
+            mock_write.assert_called_once()
+
+    def test_preserves_role_names(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """role_names in state are unchanged after rotation."""
+        from iam_ra_cli.lib import crypto
+
+        ca_kp = crypto.generate_ca(common_name="Test CA")
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(
+                ctx,
+                _state_with_existing_host(host_role_names=("admin", "readonly")),
+            )
+
+            ctx.s3.put_object(
+                Bucket="test-bucket",
+                Key="test/scopes/default/ca/certificate.pem",
+                Body=ca_kp.certificate.encode("utf-8"),
+            )
+            from iam_ra_cli.lib import paths as paths_lib
+
+            ca_key_path = (
+                paths_lib.data_dir()
+                / "test"
+                / "scopes"
+                / "default"
+                / "ca-private-key.pem"
+            )
+            ca_key_path.parent.mkdir(parents=True, exist_ok=True)
+            ca_key_path.write_text(ca_kp.private_key)
+
+            ctx.secrets.create_secret(
+                Name=(
+                    "arn:aws:secretsmanager:ap-southeast-2:"
+                    "123456789012:secret:cert"
+                ),
+                SecretString="OLD-CERT",
+            )
+            ctx.secrets.create_secret(
+                Name=(
+                    "arn:aws:secretsmanager:ap-southeast-2:"
+                    "123456789012:secret:key"
+                ),
+                SecretString="OLD-KEY",
+            )
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.decrypt_file", return_value="y"
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.parse_secrets_yaml",
+                    return_value=_mock_existing_sops(admin_only=False),
+                ),
+                patch("iam_ra_cli.workflows.host.write_and_encrypt"),
+            ):
+                result = rotate_cert(
+                    ctx,
+                    RotateCertConfig(
+                        namespace="test", hostname="myhost", validity_days=365
+                    ),
+                )
+
+            assert isinstance(result, Ok)
+
+            # Reload state and verify role_names unchanged
+            from iam_ra_cli.lib import state as state_module
+
+            loaded = state_module.load(ctx.ssm, ctx.s3, "test", skip_cache=True)
+            assert isinstance(loaded, Ok) and loaded.value is not None
+            assert set(loaded.value.hosts["myhost"].role_names) == {
+                "admin",
+                "readonly",
+            }
+
+    def test_updates_secrets_manager(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """New cert/key land in Secrets Manager via put_secret_value."""
+        from iam_ra_cli.lib import crypto
+
+        ca_kp = crypto.generate_ca(common_name="Test CA")
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            ctx.s3.put_object(
+                Bucket="test-bucket",
+                Key="test/scopes/default/ca/certificate.pem",
+                Body=ca_kp.certificate.encode("utf-8"),
+            )
+            from iam_ra_cli.lib import paths as paths_lib
+
+            ca_key_path = (
+                paths_lib.data_dir()
+                / "test"
+                / "scopes"
+                / "default"
+                / "ca-private-key.pem"
+            )
+            ca_key_path.parent.mkdir(parents=True, exist_ok=True)
+            ca_key_path.write_text(ca_kp.private_key)
+
+            ctx.secrets.create_secret(
+                Name=(
+                    "arn:aws:secretsmanager:ap-southeast-2:"
+                    "123456789012:secret:cert"
+                ),
+                SecretString="OLD-CERT",
+            )
+            ctx.secrets.create_secret(
+                Name=(
+                    "arn:aws:secretsmanager:ap-southeast-2:"
+                    "123456789012:secret:key"
+                ),
+                SecretString="OLD-KEY",
+            )
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.decrypt_file", return_value="y"
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.parse_secrets_yaml",
+                    return_value=_mock_existing_sops(),
+                ),
+                patch("iam_ra_cli.workflows.host.write_and_encrypt"),
+            ):
+                result = rotate_cert(
+                    ctx,
+                    RotateCertConfig(
+                        namespace="test", hostname="myhost"
+                    ),
+                )
+
+            assert isinstance(result, Ok)
+
+            # Verify Secrets Manager received the new values
+            cert = ctx.secrets.get_secret_value(
+                SecretId="arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:cert"
+            )["SecretString"]
+            key = ctx.secrets.get_secret_value(
+                SecretId="arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:key"
+            )["SecretString"]
+            assert cert != "OLD-CERT"
+            assert key != "OLD-KEY"
+            assert cert.startswith("-----BEGIN CERTIFICATE-----")
+            assert key.startswith("-----BEGIN EC PRIVATE KEY-----")
+
+
+class TestRotateCertErrors:
+    def test_host_not_found(self, aws_credentials, temp_xdg_dirs) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            result = rotate_cert(
+                ctx,
+                RotateCertConfig(
+                    namespace="test",
+                    hostname="does-not-exist",
+                ),
+            )
+
+            assert isinstance(result, Err)
+            assert isinstance(result.error, HostNotFoundError)
+
+    def test_not_initialized(self, aws_credentials, temp_xdg_dirs) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+
+            result = rotate_cert(
+                ctx,
+                RotateCertConfig(
+                    namespace="fresh",
+                    hostname="myhost",
+                ),
+            )
+
+            assert isinstance(result, Err)
+            assert isinstance(result.error, NotInitializedError)

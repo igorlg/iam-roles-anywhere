@@ -6,14 +6,23 @@ from pathlib import Path
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    CACertNotFoundError,
+    CAKeyNotFoundError,
     CannotRemoveLastRoleError,
     CAScopeNotFoundError,
     HostAlreadyExistsError,
     HostNotFoundError,
     NotInitializedError,
+    PCADescribeError,
+    PCAGetCertError,
+    PCAIssueCertError,
+    PCANotActiveError,
+    PCATimeoutError,
     RoleNotFoundError,
     RoleScopeMismatchError,
+    S3ReadError,
     SecretsError,
+    SecretsManagerReadError,
     SOPSEncryptError,
     StackDeleteError,
     StateLoadError,
@@ -28,7 +37,7 @@ from iam_ra_cli.lib.sops import (
     parse_secrets_yaml,
     write_and_encrypt,
 )
-from iam_ra_cli.models import Arn, CAMode, Host
+from iam_ra_cli.models import CA, Arn, CAMode, Host
 from iam_ra_cli.operations.host import (
     HostError,
     onboard_host_pca,
@@ -69,6 +78,24 @@ type RemoveRoleError = (
     | HostNotFoundError
     | RoleNotFoundError
     | CannotRemoveLastRoleError
+    | SOPSEncryptError
+    | StateLoadError
+    | StateSaveError
+)
+
+type RotateCertError = (
+    NotInitializedError
+    | HostNotFoundError
+    | CAScopeNotFoundError
+    | CAKeyNotFoundError
+    | CACertNotFoundError
+    | S3ReadError
+    | SecretsManagerReadError
+    | PCADescribeError
+    | PCANotActiveError
+    | PCAIssueCertError
+    | PCATimeoutError
+    | PCAGetCertError
     | SOPSEncryptError
     | StateLoadError
     | StateSaveError
@@ -633,5 +660,261 @@ def remove_role(
             already_absent=False,
             sops_file_path=sops_path,
             updated_role_names=new_role_names,
+        )
+    )
+
+
+# =============================================================================
+# rotate_cert: regenerate cert under the host's existing scope
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class RotateCertConfig:
+    """Configuration for rotate_cert workflow."""
+
+    namespace: str
+    hostname: str
+    validity_days: int = 365
+    sops_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class RotateCertResult:
+    """Result of a successful cert rotation."""
+
+    hostname: str
+    scope: str
+    sops_file_path: Path
+    # Role list is not changed by rotation, but returning it makes the
+    # output self-describing for JSON consumers.
+    role_names: tuple[str, ...]
+
+
+def _issue_new_host_cert(
+    ctx: AwsContext,
+    namespace: str,
+    hostname: str,
+    scope_ca: CA,
+    scope: str,
+    bucket_name: str,
+    validity_days: int,
+) -> Result[tuple[str, str], RotateCertError]:
+    """Issue a new cert+key for a host under the given scope's CA.
+
+    Returns (certificate_pem, private_key_pem). Does NOT upload to S3 or
+    touch Secrets Manager - that's the caller's job, because the semantics
+    differ between initial onboarding (upload + CFN-create secrets) and
+    rotation (update existing secrets by ARN).
+    """
+    # Avoid circular-import issues with operations/ca by importing here.
+    from iam_ra_cli.lib import crypto
+    from iam_ra_cli.lib.storage.s3 import read_object
+    from iam_ra_cli.operations.ca import _ca_cert_s3_key, _ca_key_local_path
+
+    match scope_ca.mode:
+        case CAMode.SELF_SIGNED:
+            # Load CA cert from S3
+            ca_cert_key = _ca_cert_s3_key(namespace, scope)
+            match read_object(ctx.s3, bucket_name, ca_cert_key):
+                case Err(_):
+                    return Err(CACertNotFoundError(bucket_name, ca_cert_key))
+                case Ok(ca_cert_pem):
+                    pass
+
+            # Load CA private key from local
+            ca_key_path = _ca_key_local_path(namespace, scope)
+            if not ca_key_path.exists():
+                return Err(CAKeyNotFoundError(ca_key_path))
+            ca_key_pem = ca_key_path.read_text()
+
+            kp = crypto.generate_host_cert(
+                hostname=hostname,
+                ca_cert_pem=ca_cert_pem,
+                ca_key_pem=ca_key_pem,
+                validity_days=validity_days,
+            )
+            return Ok((kp.certificate, kp.private_key))
+
+        case CAMode.PCA_NEW | CAMode.PCA_EXISTING:
+            # PCA path: CSR -> IssueCertificate -> GetCertificate
+            # Imported here to match the local-import style of the
+            # SELF_SIGNED branch above (and to avoid pulling botocore into
+            # every module that loads workflows.host).
+            from botocore.exceptions import ClientError, WaiterError
+
+            from iam_ra_cli.operations.host import PCA_CLIENT_AUTH_TEMPLATE_ARN
+
+            assert scope_ca.pca_arn is not None
+            pca_arn = str(scope_ca.pca_arn)
+
+            # Generate keypair + CSR
+            host_kc = crypto.generate_host_keypair_and_csr(hostname=hostname)
+
+            # Describe PCA to check status + get signing algorithm
+            try:
+                desc = ctx.acm_pca.describe_certificate_authority(
+                    CertificateAuthorityArn=pca_arn
+                )
+            except ClientError as e:
+                return Err(PCADescribeError(pca_arn, str(e)))
+
+            ca_info = desc["CertificateAuthority"]
+            status = ca_info.get("Status", "UNKNOWN")
+            if status != "ACTIVE":
+                return Err(PCANotActiveError(pca_arn, status))
+            signing_algorithm = ca_info["CertificateAuthorityConfiguration"][
+                "SigningAlgorithm"
+            ]
+
+            # Issue the certificate
+            try:
+                issue = ctx.acm_pca.issue_certificate(
+                    CertificateAuthorityArn=pca_arn,
+                    Csr=host_kc.csr_pem.encode("utf-8"),
+                    SigningAlgorithm=signing_algorithm,
+                    Validity={"Value": validity_days, "Type": "DAYS"},
+                    TemplateArn=PCA_CLIENT_AUTH_TEMPLATE_ARN,
+                )
+            except ClientError as e:
+                return Err(PCAIssueCertError(pca_arn, str(e)))
+
+            cert_arn = issue["CertificateArn"]
+
+            # Wait for issuance
+            waiter = ctx.acm_pca.get_waiter("certificate_issued")
+            try:
+                waiter.wait(
+                    CertificateAuthorityArn=pca_arn,
+                    CertificateArn=cert_arn,
+                    WaiterConfig={"Delay": 2, "MaxAttempts": 60},
+                )
+            except WaiterError:
+                return Err(PCATimeoutError(pca_arn, cert_arn))
+
+            # Retrieve the signed certificate
+            try:
+                got = ctx.acm_pca.get_certificate(
+                    CertificateAuthorityArn=pca_arn,
+                    CertificateArn=cert_arn,
+                )
+            except ClientError as e:
+                return Err(PCAGetCertError(pca_arn, cert_arn, str(e)))
+
+            return Ok((got["Certificate"], host_kc.private_key_pem))
+
+
+def rotate_cert(
+    ctx: AwsContext, config: RotateCertConfig
+) -> Result[RotateCertResult, RotateCertError]:
+    """Rotate a host's cert without changing its roles or stack.
+
+    Generates a new host keypair under the host's existing scope, updates
+    the Secrets Manager secrets in place (same ARNs, new values - creates
+    a new version with prior versions retained by AWS), and rewrites the
+    SOPS file with the new cert + key while preserving all existing
+    profile entries.
+
+    Preconditions:
+        - Namespace initialised.
+        - Host exists.
+        - Scope's CA material is available:
+            - self-signed: CA cert in S3 and CA private key on disk.
+            - PCA: the PCA must be in ACTIVE status.
+
+    Does NOT touch CloudFormation - the host stack is untouched. Roles
+    attached to the host are preserved exactly.
+    """
+    # Load state
+    match state_module.load(ctx.ssm, ctx.s3, config.namespace):
+        case Err(e):
+            return Err(e)
+        case Ok(None):
+            return Err(NotInitializedError(config.namespace))
+        case Ok(state):
+            pass
+
+    if not state.is_initialized:
+        return Err(NotInitializedError(config.namespace))
+    assert state.init is not None
+
+    # Host must exist
+    if config.hostname not in state.hosts:
+        return Err(HostNotFoundError(config.namespace, config.hostname))
+    host = state.hosts[config.hostname]
+
+    # Scope's CA must exist
+    if host.scope not in state.cas:
+        return Err(CAScopeNotFoundError(config.namespace, host.scope))
+    scope_ca = state.cas[host.scope]
+
+    # Resolve SOPS path up-front
+    match _resolve_sops_path(config.hostname, config.sops_path):
+        case Err(e):
+            return Err(e)
+        case Ok(sops_path):
+            pass
+
+    bucket_name = state.init.bucket_arn.resource_id
+
+    # Issue new cert + key under the host's existing scope
+    match _issue_new_host_cert(
+        ctx,
+        config.namespace,
+        config.hostname,
+        scope_ca,
+        host.scope,
+        bucket_name,
+        config.validity_days,
+    ):
+        case Err() as e:
+            return e
+        case Ok(pair):
+            new_cert_pem, new_key_pem = pair
+
+    # Update Secrets Manager: new version, same ARN. moto and AWS both
+    # accept SecretId as ARN or name.
+    from botocore.exceptions import ClientError
+
+    try:
+        ctx.secrets.put_secret_value(
+            SecretId=str(host.certificate_secret_arn),
+            SecretString=new_cert_pem,
+        )
+        ctx.secrets.put_secret_value(
+            SecretId=str(host.private_key_secret_arn),
+            SecretString=new_key_pem,
+        )
+    except ClientError as e:
+        return Err(
+            SecretsManagerReadError(
+                str(host.certificate_secret_arn),
+                f"put_secret_value failed: {e}",
+            )
+        )
+
+    # Rewrite SOPS file with new cert + key, preserving all existing
+    # profiles (and the trust_anchor_arn, account_id, region fields).
+    try:
+        decrypted = decrypt_file(sops_path)
+        secrets = parse_secrets_yaml(decrypted)
+        updated_secrets = replace(
+            secrets,
+            certificate=new_cert_pem,
+            private_key=new_key_pem,
+        )
+        yaml_content = create_secrets_yaml(
+            hostname=config.hostname, secrets=updated_secrets
+        )
+        write_and_encrypt(yaml_content, sops_path)
+    except (RuntimeError, ValueError) as e:
+        return Err(SOPSEncryptError(sops_path, str(e)))
+
+    return Ok(
+        RotateCertResult(
+            hostname=config.hostname,
+            scope=host.scope,
+            sops_file_path=sops_path,
+            role_names=host.role_names,
         )
     )

@@ -20,8 +20,10 @@ from iam_ra_cli.workflows.host import (
     OnboardConfig,
     OnboardResult,
     RemoveRoleConfig,
+    RotateCertConfig,
     add_role,
     remove_role,
+    rotate_cert,
 )
 
 # Keys written into the SOPS file by operations/secrets.py::create_secrets_file.
@@ -644,4 +646,96 @@ def host_remove_role(
         "Roles now attached",
         ", ".join(result.updated_role_names) or "(none)",
         indent=1,
+    )
+
+
+@host.command("rotate-cert")
+@click.argument("hostname")
+@namespace_option
+@aws_options
+@click.option(
+    "--validity-days",
+    default=365,
+    show_default=True,
+    help="Validity (days) for the new cert",
+)
+@click.option(
+    "--sops-output",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Override the SOPS file path. Defaults to "
+        "secrets/hosts/<hostname>/iam-ra.yaml relative to the Nix flake root."
+    ),
+)
+@json_option
+def host_rotate_cert(
+    hostname: str,
+    namespace: str,
+    region: str,
+    profile: str | None,
+    validity_days: int,
+    sops_output: str | None,
+    as_json: bool,
+) -> None:
+    """Issue a new cert for an existing host.
+
+    The cert is signed by the same CA the host was originally onboarded
+    under. Secrets Manager secrets are updated in place (new version,
+    same ARN). The SOPS file is rewritten with the new cert and key
+    while preserving all existing profile entries.
+
+    Does NOT touch CloudFormation or role attachments. Use this to renew
+    a cert that's about to expire without disturbing the host's roles.
+
+    \b
+    Examples:
+      iam-ra host rotate-cert myhost
+      iam-ra host rotate-cert myhost --validity-days 90
+    """
+    if not as_json:
+        click.echo(f"Rotating cert for host: {hostname}")
+        echo_key_value("Namespace", namespace, indent=1)
+        echo_key_value("Validity", f"{validity_days} days", indent=1)
+        click.echo()
+
+    ctx = make_context(region, profile)
+    config = RotateCertConfig(
+        namespace=namespace,
+        hostname=hostname,
+        validity_days=validity_days,
+        sops_path=Path(sops_output) if sops_output else None,
+    )
+
+    result = handle_result(
+        rotate_cert(ctx, config),
+        success_message=(
+            None if as_json else f"Cert rotated for host '{hostname}'."
+        ),
+        as_json=as_json,
+    )
+
+    if as_json:
+        # Schema: { schema_version, hostname, scope, sops_file_path,
+        #           role_names: [str, ...] }
+        click.echo(
+            render_json(
+                {
+                    "hostname": result.hostname,
+                    "scope": result.scope,
+                    "sops_file_path": str(result.sops_file_path),
+                    "role_names": list(result.role_names),
+                }
+            )
+        )
+        return
+
+    click.echo(
+        "  New cert issued, Secrets Manager updated, SOPS file rewritten."
+    )
+    click.echo()
+    echo_key_value("SOPS file", str(result.sops_file_path), indent=1)
+    echo_key_value("Scope", result.scope, indent=1)
+    echo_key_value(
+        "Roles unchanged", ", ".join(result.role_names), indent=1
     )
