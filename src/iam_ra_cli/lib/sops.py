@@ -298,20 +298,32 @@ def get_nix_repo_root() -> Path | None:
     return None
 
 
-def get_secrets_path(hostname: str, repo_root: Path | None = None) -> Path:
-    """Get the path where host secrets should be stored.
+def get_secrets_path(
+    hostname: str,
+    namespace: str = "default",
+    repo_root: Path | None = None,
+) -> Path:
+    """Canonical SOPS file path for a host in a namespace.
 
-    NOTE: In the forthcoming multi-identity work (scenario 3), this path
-    will gain a `-{namespace}` suffix so one host can hold multiple SOPS
-    files (one per identity). For now the legacy `iam-ra.yaml` name is
-    kept so scenario-2 work doesn't cascade into path changes.
+    Always returns the namespace-suffixed form
+    (``secrets/hosts/{hostname}/iam-ra-{namespace}.yaml``). Scenario 3 of
+    the multi-identity plan requires per-namespace filenames because one
+    host can hold SOPS files for multiple namespaces (e.g. personal vs
+    work credentials on the same laptop).
+
+    Callers that need to read pre-multi-identity files (``iam-ra.yaml``
+    without a namespace suffix) use :func:`resolve_existing_secrets_path`
+    which honours the legacy name for the default namespace only.
 
     Args:
-        hostname: Host identifier
-        repo_root: Optional repository root path.
+        hostname: Host identifier.
+        namespace: IAM-RA namespace. Defaults to ``"default"``.
+        repo_root: Optional explicit Nix repo root; falls back to
+            walking up from cwd.
 
-    Returns:
-        Path to the secrets file.
+    Raises:
+        RuntimeError: Nix repo root couldn't be located (no flake.nix
+            found by walking up from cwd).
     """
     if repo_root is None:
         repo_root = get_nix_repo_root()
@@ -319,4 +331,53 @@ def get_secrets_path(hostname: str, repo_root: Path | None = None) -> Path:
     if repo_root is None:
         raise RuntimeError("Could not find Nix repository root (flake.nix)")
 
-    return repo_root / "secrets" / "hosts" / hostname / "iam-ra.yaml"
+    return (
+        repo_root
+        / "secrets"
+        / "hosts"
+        / hostname
+        / f"iam-ra-{namespace}.yaml"
+    )
+
+
+def resolve_existing_secrets_path(
+    hostname: str,
+    namespace: str = "default",
+    repo_root: Path | None = None,
+) -> tuple[Path, bool]:
+    """Resolve the path to an existing SOPS file, with legacy fallback.
+
+    Used by read-then-write workflows (add-role, remove-role, rotate-cert,
+    migrate) that may encounter pre-multi-identity files named
+    ``iam-ra.yaml`` without a namespace suffix.
+
+    Returns:
+        ``(path, is_legacy)``:
+        - Canonical exists -> ``(canonical, False)``.
+        - Canonical missing, legacy exists, ``namespace == "default"`` ->
+          ``(legacy, True)``.
+        - Neither exists (or namespace is not default) ->
+          ``(canonical, False)``. Caller will hit FileNotFoundError when
+          trying to read; surface that as its own error.
+
+    Callers that see ``is_legacy=True`` should surface a warning and
+    direct the user at ``iam-ra migrate sops-paths`` for the explicit
+    rename. Don't rename silently - users' Nix configs reference the
+    old filename too.
+    """
+    canonical = get_secrets_path(hostname, namespace, repo_root)
+    if canonical.exists():
+        return canonical, False
+
+    if namespace == "default":
+        # Legacy files only existed in the default-namespace era.
+        if repo_root is None:
+            repo_root = get_nix_repo_root()
+        if repo_root is not None:
+            legacy = repo_root / "secrets" / "hosts" / hostname / "iam-ra.yaml"
+            if legacy.exists():
+                return legacy, True
+
+    # Neither found -> return the canonical path. Caller handles
+    # missing-file errors.
+    return canonical, False

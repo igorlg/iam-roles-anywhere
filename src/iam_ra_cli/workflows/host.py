@@ -6,6 +6,7 @@ from pathlib import Path
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    AccountMismatchError,
     CACertNotFoundError,
     CAKeyNotFoundError,
     CannotRemoveLastRoleError,
@@ -28,13 +29,14 @@ from iam_ra_cli.lib.errors import (
     StateLoadError,
     StateSaveError,
 )
+from iam_ra_cli.lib.preflight import check_account_matches_namespace
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.lib.sops import (
     SopsProfile,
     create_secrets_yaml,
     decrypt_file,
-    get_secrets_path,
     parse_secrets_yaml,
+    resolve_existing_secrets_path,
     write_and_encrypt,
 )
 from iam_ra_cli.models import CA, Arn, CAMode, Host
@@ -50,6 +52,7 @@ from iam_ra_cli.operations.secrets import SecretsFileResult, create_secrets_file
 
 type OnboardError = (
     NotInitializedError
+    | AccountMismatchError
     | RoleNotFoundError
     | CAScopeNotFoundError
     | HostAlreadyExistsError
@@ -59,12 +62,18 @@ type OnboardError = (
     | StateLoadError
 )
 type OffboardError = (
-    NotInitializedError | HostNotFoundError | StackDeleteError | StateSaveError | StateLoadError
+    NotInitializedError
+    | AccountMismatchError
+    | HostNotFoundError
+    | StackDeleteError
+    | StateSaveError
+    | StateLoadError
 )
 type ListHostsError = NotInitializedError | StateLoadError
 
 type AddRoleError = (
     NotInitializedError
+    | AccountMismatchError
     | HostNotFoundError
     | RoleNotFoundError
     | RoleScopeMismatchError
@@ -75,6 +84,7 @@ type AddRoleError = (
 
 type RemoveRoleError = (
     NotInitializedError
+    | AccountMismatchError
     | HostNotFoundError
     | RoleNotFoundError
     | CannotRemoveLastRoleError
@@ -85,6 +95,7 @@ type RemoveRoleError = (
 
 type RotateCertError = (
     NotInitializedError
+    | AccountMismatchError
     | HostNotFoundError
     | CAScopeNotFoundError
     | CAKeyNotFoundError
@@ -181,6 +192,13 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
         return Err(NotInitializedError(config.namespace))
 
     assert state.init is not None
+
+    # Fail fast if current credentials are for the wrong AWS account.
+    match check_account_matches_namespace(ctx, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
 
     if not config.role_names:
         # Empty tuple - caller bug. Treat as role-not-found for now with
@@ -305,6 +323,7 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
             trust_anchor_arn=str(scope_ca.trust_anchor_arn),
             account_id=account_id,
             profiles=sops_profiles,
+            namespace=config.namespace,
             output_path=config.sops_output_path,
             overwrite=config.overwrite,
         ):
@@ -353,6 +372,13 @@ def offboard(
         return Err(NotInitializedError(namespace))
 
     assert state.init is not None
+
+    # Fail fast if current credentials are for the wrong AWS account.
+    match check_account_matches_namespace(ctx, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
 
     # Check host exists
     if hostname not in state.hosts:
@@ -445,14 +471,27 @@ class RemoveRoleResult:
     updated_role_names: tuple[str, ...]
 
 
-def _resolve_sops_path(hostname: str, override: Path | None) -> Result[Path, SOPSEncryptError]:
-    """Resolve the SOPS file path, or return an error if we can't find
-    a Nix flake root and the caller didn't override.
+def _resolve_sops_path(
+    hostname: str,
+    namespace: str,
+    override: Path | None,
+) -> Result[tuple[Path, bool], SOPSEncryptError]:
+    """Resolve the SOPS file path for a host in a namespace.
+
+    Returns ``(path, is_legacy)``. ``is_legacy=True`` means we fell back
+    to the pre-multi-identity ``iam-ra.yaml`` name for the default
+    namespace; callers should surface a warning pointing at
+    ``iam-ra migrate sops-paths`` for an explicit rename. When the
+    caller passes an ``override`` path, ``is_legacy`` is False (the
+    override is taken at face value).
+
+    Errors when the Nix flake root can't be located and no override
+    was given.
     """
     if override is not None:
-        return Ok(override)
+        return Ok((override, False))
     try:
-        return Ok(get_secrets_path(hostname))
+        return Ok(resolve_existing_secrets_path(hostname, namespace))
     except RuntimeError as e:
         return Err(SOPSEncryptError(Path("."), str(e)))
 
@@ -485,6 +524,13 @@ def add_role(ctx: AwsContext, config: AddRoleConfig) -> Result[AddRoleResult, Ad
     if not state.is_initialized:
         return Err(NotInitializedError(config.namespace))
 
+    # Fail fast if current credentials are for the wrong AWS account.
+    match check_account_matches_namespace(ctx, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
+
     # Host must exist
     if config.hostname not in state.hosts:
         return Err(HostNotFoundError(config.namespace, config.hostname))
@@ -507,11 +553,13 @@ def add_role(ctx: AwsContext, config: AddRoleConfig) -> Result[AddRoleResult, Ad
             )
         )
 
-    # Resolve SOPS path up-front so errors surface before we do work
-    match _resolve_sops_path(config.hostname, config.sops_path):
+    # Resolve SOPS path up-front so errors surface before we do work.
+    # `is_legacy` indicates fallback to the pre-multi-identity iam-ra.yaml
+    # name; surfaced in the result so the CLI can warn the user.
+    match _resolve_sops_path(config.hostname, config.namespace, config.sops_path):
         case Err(e):
             return Err(e)
-        case Ok(sops_path):
+        case Ok((sops_path, _is_legacy)):
             pass
 
     # Idempotency: role already attached -> no-op success
@@ -595,16 +643,23 @@ def remove_role(
     if not state.is_initialized:
         return Err(NotInitializedError(config.namespace))
 
+    # Fail fast if current credentials are for the wrong AWS account.
+    match check_account_matches_namespace(ctx, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
+
     # Host must exist
     if config.hostname not in state.hosts:
         return Err(HostNotFoundError(config.namespace, config.hostname))
     host = state.hosts[config.hostname]
 
     # Resolve SOPS path up-front
-    match _resolve_sops_path(config.hostname, config.sops_path):
+    match _resolve_sops_path(config.hostname, config.namespace, config.sops_path):
         case Err(e):
             return Err(e)
-        case Ok(sops_path):
+        case Ok((sops_path, _is_legacy)):
             pass
 
     # Idempotency: role not attached -> no-op success
@@ -838,6 +893,13 @@ def rotate_cert(
         return Err(NotInitializedError(config.namespace))
     assert state.init is not None
 
+    # Fail fast if current credentials are for the wrong AWS account.
+    match check_account_matches_namespace(ctx, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
+
     # Host must exist
     if config.hostname not in state.hosts:
         return Err(HostNotFoundError(config.namespace, config.hostname))
@@ -849,10 +911,10 @@ def rotate_cert(
     scope_ca = state.cas[host.scope]
 
     # Resolve SOPS path up-front
-    match _resolve_sops_path(config.hostname, config.sops_path):
+    match _resolve_sops_path(config.hostname, config.namespace, config.sops_path):
         case Err(e):
             return Err(e)
-        case Ok(sops_path):
+        case Ok((sops_path, _is_legacy)):
             pass
 
     bucket_name = state.init.bucket_arn.resource_id

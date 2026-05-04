@@ -38,6 +38,7 @@ def create_secrets_file(
     trust_anchor_arn: str,
     account_id: str,
     profiles: tuple[SopsProfile, ...],
+    namespace: str = "default",
     output_path: Path | None = None,
     encrypt: bool = True,
     overwrite: bool = False,
@@ -63,7 +64,7 @@ def create_secrets_file(
     # Determine output path
     if output_path is None:
         try:
-            path = get_secrets_path(hostname)
+            path = get_secrets_path(hostname, namespace)
         except RuntimeError as e:
             return Err(SOPSEncryptError(Path("."), str(e)))
     else:

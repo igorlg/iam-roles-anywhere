@@ -315,3 +315,123 @@ private_key: KEY
     def test_empty_yaml_raises(self) -> None:
         with pytest.raises(ValueError):
             parse_secrets_yaml("")
+
+
+# =============================================================================
+# Path resolution (namespace-aware, legacy fallback)
+# =============================================================================
+
+
+class TestGetSecretsPath:
+    """get_secrets_path is the canonical write path.
+
+    Always returns the namespace-suffixed form. Callers that need to
+    handle pre-multi-identity files use resolve_existing_secrets_path.
+    """
+
+    def test_default_namespace_suffix(self, tmp_path) -> None:
+        from iam_ra_cli.lib.sops import get_secrets_path
+
+        (tmp_path / "flake.nix").write_text("{}")
+        path = get_secrets_path("myhost", namespace="default", repo_root=tmp_path)
+
+        assert path == tmp_path / "secrets" / "hosts" / "myhost" / "iam-ra-default.yaml"
+
+    def test_non_default_namespace_suffix(self, tmp_path) -> None:
+        from iam_ra_cli.lib.sops import get_secrets_path
+
+        (tmp_path / "flake.nix").write_text("{}")
+        path = get_secrets_path("myhost", namespace="work", repo_root=tmp_path)
+
+        assert path == tmp_path / "secrets" / "hosts" / "myhost" / "iam-ra-work.yaml"
+
+    def test_namespace_defaults_to_default(self, tmp_path) -> None:
+        """Omitting namespace must resolve as namespace='default' for
+        backward-compat with existing callers."""
+        from iam_ra_cli.lib.sops import get_secrets_path
+
+        (tmp_path / "flake.nix").write_text("{}")
+        path = get_secrets_path("myhost", repo_root=tmp_path)
+
+        assert path.name == "iam-ra-default.yaml"
+
+
+class TestResolveExistingSecretsPath:
+    """resolve_existing_secrets_path handles the legacy `iam-ra.yaml`
+    (pre-multi-identity) for the default namespace, warning the user to
+    run the explicit migrate command.
+
+    Contract:
+      - Canonical path exists -> return (canonical, is_legacy=False).
+      - Canonical missing, legacy exists, namespace=default ->
+        return (legacy, is_legacy=True).
+      - Canonical missing, legacy missing or non-default namespace ->
+        return (canonical, is_legacy=False). Caller gets a path to a
+        non-existent file to react on (FileNotFoundError on read).
+    """
+
+    def test_canonical_wins_when_both_exist(self, tmp_path) -> None:
+        from iam_ra_cli.lib.sops import resolve_existing_secrets_path
+
+        (tmp_path / "flake.nix").write_text("{}")
+        host_dir = tmp_path / "secrets" / "hosts" / "myhost"
+        host_dir.mkdir(parents=True)
+        canonical = host_dir / "iam-ra-default.yaml"
+        legacy = host_dir / "iam-ra.yaml"
+        canonical.write_text("canonical")
+        legacy.write_text("legacy")
+
+        path, is_legacy = resolve_existing_secrets_path(
+            "myhost", namespace="default", repo_root=tmp_path
+        )
+
+        assert path == canonical
+        assert is_legacy is False
+
+    def test_falls_back_to_legacy_for_default_namespace(self, tmp_path) -> None:
+        from iam_ra_cli.lib.sops import resolve_existing_secrets_path
+
+        (tmp_path / "flake.nix").write_text("{}")
+        host_dir = tmp_path / "secrets" / "hosts" / "myhost"
+        host_dir.mkdir(parents=True)
+        legacy = host_dir / "iam-ra.yaml"
+        legacy.write_text("legacy-only")
+
+        path, is_legacy = resolve_existing_secrets_path(
+            "myhost", namespace="default", repo_root=tmp_path
+        )
+
+        assert path == legacy
+        assert is_legacy is True
+
+    def test_no_legacy_fallback_for_non_default_namespace(self, tmp_path) -> None:
+        """Legacy file (iam-ra.yaml) is only ambiguous in the default-namespace
+        case. For other namespaces, a legacy file near a non-default
+        canonical path doesn't mean anything and shouldn't be silently
+        consumed."""
+        from iam_ra_cli.lib.sops import resolve_existing_secrets_path
+
+        (tmp_path / "flake.nix").write_text("{}")
+        host_dir = tmp_path / "secrets" / "hosts" / "myhost"
+        host_dir.mkdir(parents=True)
+        legacy = host_dir / "iam-ra.yaml"
+        legacy.write_text("legacy")  # for the default namespace conceptually
+
+        path, is_legacy = resolve_existing_secrets_path(
+            "myhost", namespace="work", repo_root=tmp_path
+        )
+
+        # Doesn't find anything - returns canonical (which doesn't exist)
+        assert path == host_dir / "iam-ra-work.yaml"
+        assert is_legacy is False
+
+    def test_nothing_exists_returns_canonical(self, tmp_path) -> None:
+        from iam_ra_cli.lib.sops import resolve_existing_secrets_path
+
+        (tmp_path / "flake.nix").write_text("{}")
+        path, is_legacy = resolve_existing_secrets_path(
+            "myhost", namespace="default", repo_root=tmp_path
+        )
+
+        assert path.name == "iam-ra-default.yaml"
+        assert is_legacy is False

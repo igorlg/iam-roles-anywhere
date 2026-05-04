@@ -3,6 +3,7 @@
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    AccountMismatchError,
     CAScopeNotFoundError,
     NotInitializedError,
     RoleInUseError,
@@ -12,16 +13,23 @@ from iam_ra_cli.lib.errors import (
     StateLoadError,
     StateSaveError,
 )
+from iam_ra_cli.lib.preflight import check_account_matches_namespace
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.models import Role
 from iam_ra_cli.operations.role import create_role as create_role_op
 from iam_ra_cli.operations.role import delete_role as delete_role_op
 
 type CreateRoleError = (
-    NotInitializedError | CAScopeNotFoundError | StackDeployError | StateSaveError | StateLoadError
+    NotInitializedError
+    | AccountMismatchError
+    | CAScopeNotFoundError
+    | StackDeployError
+    | StateSaveError
+    | StateLoadError
 )
 type DeleteRoleError = (
     NotInitializedError
+    | AccountMismatchError
     | RoleNotFoundError
     | RoleInUseError
     | StackDeleteError
@@ -62,6 +70,13 @@ def create_role(
 
     if not state.is_initialized:
         return Err(NotInitializedError(namespace))
+
+    # Fail fast if current credentials are for the wrong AWS account.
+    match check_account_matches_namespace(ctx, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
 
     # Validate scope exists
     if scope not in state.cas:
@@ -129,6 +144,13 @@ def delete_role(
 
     if not state.is_initialized:
         return Err(NotInitializedError(namespace))
+
+    # Fail fast if current credentials are for the wrong AWS account.
+    match check_account_matches_namespace(ctx, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
 
     # Check role exists
     if name not in state.roles:

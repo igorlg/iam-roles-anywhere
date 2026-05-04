@@ -442,6 +442,103 @@ class TestOnboardErrorTypeUnion:
             assert isinstance(result.error, NotInitializedError)
 
 
+class TestOnboardAccountMismatch:
+    """Fail fast when AWS credentials don't match the namespace's account."""
+
+    def test_account_mismatch_rejects_onboard(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """Namespace pinned to account X, credentials for account Y -> Err."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+
+            # Namespace set up with a DIFFERENT account than moto's default
+            # (which is 123456789012 for ctx.account_id via STS).
+            state = State(
+                namespace="work",
+                region="ap-southeast-2",
+                version="3.0.0",
+                namespace_info=NamespaceInfo(
+                    account_id="999999999999",  # not ctx.account_id
+                    region="ap-southeast-2",
+                ),
+                init=Init(
+                    stack_name="iam-ra-work-init",
+                    bucket_arn=Arn("arn:aws:s3:::test-bucket"),
+                    kms_key_arn=Arn(
+                        "arn:aws:kms:ap-southeast-2:999999999999:key/test-key"
+                    ),
+                ),
+                cas={
+                    "default": CA(
+                        stack_name="iam-ra-work-ca-default",
+                        mode=CAMode.SELF_SIGNED,
+                        trust_anchor_arn=Arn(
+                            "arn:aws:rolesanywhere:ap-southeast-2:999999999999:trust-anchor/ta"
+                        ),
+                        account_id="999999999999",
+                    ),
+                },
+                roles={
+                    "admin": Role(
+                        stack_name="iam-ra-work-role-admin",
+                        role_arn=Arn("arn:aws:iam::999999999999:role/admin"),
+                        profile_arn=Arn(
+                            "arn:aws:rolesanywhere:ap-southeast-2:999999999999:profile/admin"
+                        ),
+                        scope="default",
+                    ),
+                },
+            )
+            setup_state_in_aws(ctx, state)
+
+            config = OnboardConfig(
+                namespace="work",
+                hostname="myhost",
+                role_names=("admin",),
+            )
+            result = onboard(ctx, config)
+
+            from iam_ra_cli.lib.errors import AccountMismatchError
+
+            assert isinstance(result, Err)
+            assert isinstance(result.error, AccountMismatchError)
+            assert result.error.expected_account_id == "999999999999"
+            assert result.error.actual_account_id == "123456789012"
+
+    def test_pre_v3_state_without_namespace_info_passes(
+        self, aws_credentials, temp_xdg_dirs, state_default_scope: State
+    ) -> None:
+        """Legacy state files without namespace_info skip the check rather
+        than fail (back-compat: we can't check what isn't recorded)."""
+        # state_default_scope fixture doesn't set namespace_info
+        assert state_default_scope.namespace_info is None
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_state_in_aws(ctx, state_default_scope)
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.onboard_host_self_signed",
+                    return_value=Ok(MOCK_HOST_RESULT),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.create_secrets_file",
+                    return_value=Ok(SecretsFileResult(path=Path("/tmp/s.yaml"), encrypted=False)),
+                ),
+            ):
+                config = OnboardConfig(
+                    namespace="test",
+                    hostname="myhost",
+                    role_names=("admin",),
+                )
+                result = onboard(ctx, config)
+
+            # No namespace_info -> account check skipped, onboard succeeds
+            assert isinstance(result, Ok)
+
+
 class TestOnboardResultFields:
     """OnboardResult must expose everything the CLI needs to guide the user's
     Nix setup: trust anchor / profile / role ARNs, region, namespace.
@@ -749,10 +846,11 @@ class TestAddRoleSuccess:
             ctx = AwsContext(region="ap-southeast-2")
             _setup_state_in_s3(ctx, _state_with_existing_host())
 
-            captured_yaml = {}
+            captured_yaml: dict = {}
 
             def capture_write(content: str, path: Path, *a, **k) -> None:
                 captured_yaml["content"] = content
+                captured_yaml["path"] = path
 
             with (
                 patch(
@@ -783,6 +881,9 @@ class TestAddRoleSuccess:
             assert "readonly" in captured_yaml["content"]
             # Specifically the new role's ARN
             assert "role/readonly" in captured_yaml["content"]
+            # Namespace-aware path: the test namespace is "test", so the
+            # file must have the matching suffix (scenario 3 guarantee).
+            assert captured_yaml["path"].name == "iam-ra-test.yaml"
 
     def test_state_persists_new_role_list(
         self, aws_credentials, temp_xdg_dirs
@@ -974,6 +1075,7 @@ class TestRemoveRoleSuccess:
 
         def capture(content: str, path: Path, *a, **k) -> None:
             captured["content"] = content
+            captured["path"] = path
 
         with mock_aws():
             ctx = AwsContext(region="ap-southeast-2")
@@ -1002,6 +1104,8 @@ class TestRemoveRoleSuccess:
 
             assert "role/readonly" not in captured["content"]
             assert "role/admin" in captured["content"]
+            # Namespace-aware path: matches the test namespace.
+            assert captured["path"].name == "iam-ra-test.yaml"
 
 
 class TestRemoveRoleIdempotent:
