@@ -1,3 +1,3 @@
 """IAM Roles Anywhere CLI - Certificate-based AWS authentication."""
 
-__version__ = "2.4.2"
+__version__ = "2.5.0"
