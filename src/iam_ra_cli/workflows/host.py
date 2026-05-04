@@ -17,6 +17,7 @@ from iam_ra_cli.lib.errors import (
     StateSaveError,
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
+from iam_ra_cli.lib.sops import SopsProfile
 from iam_ra_cli.models import Arn, CAMode, Host
 from iam_ra_cli.operations.host import (
     HostError,
@@ -222,22 +223,31 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
             pass
 
     # Create SOPS secrets file if requested
-    # NOTE: the SOPS file currently holds a single (profile_arn, role_arn)
-    # pair. Multi-role writing to SOPS is implemented in the follow-up
-    # commit for SOPS schema v2; for now the first role is written. A host
-    # onboarded with multiple roles will see a warning from the v2 SOPS
-    # work - still works for single-role hosts unchanged.
+    # The v2 SOPS schema stores all role_profiles under a nested 'profiles'
+    # map (not just the first role). A host onboarded with N roles writes N
+    # profile entries into the SOPS file.
     secrets_result: SecretsFileResult | None = None
     if config.create_sops:
-        primary = role_profiles[0]
+        sops_profiles = tuple(
+            SopsProfile(
+                role_name=rp.role_name,
+                profile_arn=str(rp.profile_arn),
+                role_arn=str(rp.role_arn),
+            )
+            for rp in role_profiles
+        )
+        # account_id: prefer the one already recorded on the CA; fall back
+        # to deriving from the trust anchor ARN if unset (v2 state that
+        # hasn't been migrated / resaved yet).
+        account_id = scope_ca.account_id or scope_ca.trust_anchor_arn.account
         match create_secrets_file(
             ctx,
             hostname=config.hostname,
             certificate_secret_arn=str(host_result.certificate_secret_arn),
             private_key_secret_arn=str(host_result.private_key_secret_arn),
             trust_anchor_arn=str(scope_ca.trust_anchor_arn),
-            profile_arn=str(primary.profile_arn),
-            role_arn=str(primary.role_arn),
+            account_id=account_id,
+            profiles=sops_profiles,
             output_path=config.sops_output_path,
             overwrite=config.overwrite,
         ):

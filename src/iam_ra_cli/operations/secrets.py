@@ -13,7 +13,13 @@ from iam_ra_cli.lib.errors import (
     SOPSEncryptError,
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
-from iam_ra_cli.lib.sops import create_secrets_yaml, get_secrets_path, write_and_encrypt
+from iam_ra_cli.lib.sops import (
+    SopsProfile,
+    SopsSecrets,
+    create_secrets_yaml,
+    get_secrets_path,
+    write_and_encrypt,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,25 +36,29 @@ def create_secrets_file(
     certificate_secret_arn: str,
     private_key_secret_arn: str,
     trust_anchor_arn: str,
-    profile_arn: str,
-    role_arn: str,
+    account_id: str,
+    profiles: tuple[SopsProfile, ...],
     output_path: Path | None = None,
     encrypt: bool = True,
     overwrite: bool = False,
 ) -> Result[SecretsFileResult, SecretsError]:
-    """Create a SOPS-encrypted secrets file for Nix deployment.
+    """Create a SOPS-encrypted v2 secrets file for Nix deployment.
 
     Args:
         ctx: AWS context
-        hostname: Host identifier
-        certificate_secret_arn: Secrets Manager ARN for certificate
-        private_key_secret_arn: Secrets Manager ARN for private key
+        hostname: Host identifier (for the file header)
+        certificate_secret_arn: Secrets Manager ARN holding the PEM cert
+        private_key_secret_arn: Secrets Manager ARN holding the PEM key
         trust_anchor_arn: Trust Anchor ARN
-        profile_arn: Roles Anywhere Profile ARN
-        role_arn: IAM Role ARN
-        output_path: Output path (default: secrets/hosts/<hostname>/iam-ra.yaml)
-        encrypt: Whether to encrypt with SOPS
-        overwrite: Whether to overwrite existing file
+        account_id: AWS account ID (written into the v2 YAML for
+            downstream validation in the Nix module)
+        profiles: Tuple of SopsProfile - all roles this host can assume
+            using the cert. At least one required.
+        output_path: Override output path. If None, uses
+            ``secrets/hosts/<hostname>/iam-ra.yaml`` relative to the Nix
+            flake root.
+        encrypt: Whether to run SOPS encryption after writing.
+        overwrite: Whether to overwrite an existing file at output_path.
     """
     # Determine output path
     if output_path is None:
@@ -63,7 +73,7 @@ def create_secrets_file(
     if path.exists() and not overwrite:
         return Err(SecretsFileExistsError(path))
 
-    # Retrieve secrets from Secrets Manager
+    # Retrieve cert + key from Secrets Manager
     try:
         cert_response = ctx.secrets.get_secret_value(SecretId=certificate_secret_arn)
         certificate = cert_response["SecretString"]
@@ -76,16 +86,16 @@ def create_secrets_file(
     except ClientError as e:
         return Err(SecretsManagerReadError(private_key_secret_arn, str(e)))
 
-    # Create YAML content
-    yaml_content = create_secrets_yaml(
-        hostname=hostname,
+    # Render v2 YAML
+    secrets = SopsSecrets(
         certificate=certificate,
         private_key=private_key,
         trust_anchor_arn=trust_anchor_arn,
-        profile_arn=profile_arn,
-        role_arn=role_arn,
+        account_id=account_id,
         region=ctx.region,
+        profiles=profiles,
     )
+    yaml_content = create_secrets_yaml(hostname=hostname, secrets=secrets)
 
     if encrypt:
         # Write and encrypt with SOPS
