@@ -123,6 +123,37 @@ class HostAlreadyExistsError:
     hostname: str
 
 
+@dataclass(frozen=True, slots=True)
+class RoleScopeMismatchError:
+    """Attempted to attach a role to a host, but the role's scope differs
+    from the host's scope.
+
+    A host's cert is issued under one scope's CA / trust anchor and can
+    only assume roles whose profiles are attached to that same trust anchor.
+    Crossing scopes would require a second cert (scenario 3, multi-identity).
+    """
+
+    namespace: str
+    hostname: str
+    host_scope: str
+    role_name: str
+    role_scope: str
+
+
+@dataclass(frozen=True, slots=True)
+class CannotRemoveLastRoleError:
+    """Refused to remove the last remaining role from a host.
+
+    A host with zero roles has a cert but nothing to assume, which leaves
+    it in an unusable state. `iam-ra host offboard <hostname>` is the right
+    command to remove a host entirely.
+    """
+
+    namespace: str
+    hostname: str
+    role_name: str
+
+
 # =============================================================================
 # Storage Errors
 # =============================================================================

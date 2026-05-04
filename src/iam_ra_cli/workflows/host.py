@@ -1,23 +1,33 @@
-"""Host workflows - onboard, offboard, list hosts."""
+"""Host workflows - onboard, offboard, list, add/remove role."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    CannotRemoveLastRoleError,
     CAScopeNotFoundError,
     HostAlreadyExistsError,
     HostNotFoundError,
     NotInitializedError,
     RoleNotFoundError,
+    RoleScopeMismatchError,
     SecretsError,
+    SOPSEncryptError,
     StackDeleteError,
     StateLoadError,
     StateSaveError,
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
-from iam_ra_cli.lib.sops import SopsProfile
+from iam_ra_cli.lib.sops import (
+    SopsProfile,
+    create_secrets_yaml,
+    decrypt_file,
+    get_secrets_path,
+    parse_secrets_yaml,
+    write_and_encrypt,
+)
 from iam_ra_cli.models import Arn, CAMode, Host
 from iam_ra_cli.operations.host import (
     HostError,
@@ -43,6 +53,26 @@ type OffboardError = (
     NotInitializedError | HostNotFoundError | StackDeleteError | StateSaveError | StateLoadError
 )
 type ListHostsError = NotInitializedError | StateLoadError
+
+type AddRoleError = (
+    NotInitializedError
+    | HostNotFoundError
+    | RoleNotFoundError
+    | RoleScopeMismatchError
+    | SOPSEncryptError
+    | StateLoadError
+    | StateSaveError
+)
+
+type RemoveRoleError = (
+    NotInitializedError
+    | HostNotFoundError
+    | RoleNotFoundError
+    | CannotRemoveLastRoleError
+    | SOPSEncryptError
+    | StateLoadError
+    | StateSaveError
+)
 
 
 @dataclass(frozen=True)
@@ -331,3 +361,277 @@ def list_hosts(ctx: AwsContext, namespace: str) -> Result[dict[str, Host], ListH
             return Err(NotInitializedError(namespace))
         case Ok(state):
             return Ok(state.hosts)
+
+
+# =============================================================================
+# add_role / remove_role (scenario 2: multi-role, same cert)
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class AddRoleConfig:
+    """Configuration for add_role workflow."""
+
+    namespace: str
+    hostname: str
+    role_name: str
+    sops_path: Path | None = None  # Override; defaults to get_secrets_path(hostname)
+
+
+@dataclass(frozen=True)
+class AddRoleResult:
+    """Result of add_role workflow.
+
+    `already_present` is True when the role was already attached (no-op);
+    callers can surface this to distinguish "I did work" from "nothing to do".
+    """
+
+    hostname: str
+    role_name: str
+    already_present: bool
+    sops_file_path: Path
+    updated_role_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RemoveRoleConfig:
+    """Configuration for remove_role workflow."""
+
+    namespace: str
+    hostname: str
+    role_name: str
+    sops_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class RemoveRoleResult:
+    """Result of remove_role workflow.
+
+    `already_absent` is True when the role wasn't attached to begin with
+    (no-op); callers can surface this.
+    """
+
+    hostname: str
+    role_name: str
+    already_absent: bool
+    sops_file_path: Path
+    updated_role_names: tuple[str, ...]
+
+
+def _resolve_sops_path(hostname: str, override: Path | None) -> Result[Path, SOPSEncryptError]:
+    """Resolve the SOPS file path, or return an error if we can't find
+    a Nix flake root and the caller didn't override.
+    """
+    if override is not None:
+        return Ok(override)
+    try:
+        return Ok(get_secrets_path(hostname))
+    except RuntimeError as e:
+        return Err(SOPSEncryptError(Path("."), str(e)))
+
+
+def add_role(ctx: AwsContext, config: AddRoleConfig) -> Result[AddRoleResult, AddRoleError]:
+    """Attach an additional role to an existing host.
+
+    Does NOT issue a new cert or redeploy the host stack. Updates the
+    host's role_names in state and appends a new SopsProfile to the
+    SOPS secrets file.
+
+    Preconditions:
+        - Namespace initialised.
+        - Host exists.
+        - Role exists.
+        - Role's scope matches the host's scope (same trust anchor).
+
+    Idempotent: if the role is already attached, returns Ok with
+    already_present=True and does not rewrite the SOPS file.
+    """
+    # Load state
+    match state_module.load(ctx.ssm, ctx.s3, config.namespace):
+        case Err(e):
+            return Err(e)
+        case Ok(None):
+            return Err(NotInitializedError(config.namespace))
+        case Ok(state):
+            pass
+
+    if not state.is_initialized:
+        return Err(NotInitializedError(config.namespace))
+
+    # Host must exist
+    if config.hostname not in state.hosts:
+        return Err(HostNotFoundError(config.namespace, config.hostname))
+    host = state.hosts[config.hostname]
+
+    # Role must exist
+    if config.role_name not in state.roles:
+        return Err(RoleNotFoundError(config.namespace, config.role_name))
+    role = state.roles[config.role_name]
+
+    # Scope check: role must live in the same scope as the host's cert
+    if role.scope != host.scope:
+        return Err(
+            RoleScopeMismatchError(
+                namespace=config.namespace,
+                hostname=config.hostname,
+                host_scope=host.scope,
+                role_name=config.role_name,
+                role_scope=role.scope,
+            )
+        )
+
+    # Resolve SOPS path up-front so errors surface before we do work
+    match _resolve_sops_path(config.hostname, config.sops_path):
+        case Err(e):
+            return Err(e)
+        case Ok(sops_path):
+            pass
+
+    # Idempotency: role already attached -> no-op success
+    if config.role_name in host.role_names:
+        return Ok(
+            AddRoleResult(
+                hostname=config.hostname,
+                role_name=config.role_name,
+                already_present=True,
+                sops_file_path=sops_path,
+                updated_role_names=host.role_names,
+            )
+        )
+
+    # Update state: append the new role to host.role_names
+    new_role_names = (*host.role_names, config.role_name)
+    updated_host = replace(host, role_names=new_role_names)
+    state.hosts[config.hostname] = updated_host
+
+    match state_module.save(ctx.ssm, ctx.s3, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
+
+    # Read existing SOPS file, append the new profile, write back
+    try:
+        decrypted = decrypt_file(sops_path)
+        secrets = parse_secrets_yaml(decrypted)
+        new_profile = SopsProfile(
+            role_name=config.role_name,
+            profile_arn=str(role.profile_arn),
+            role_arn=str(role.role_arn),
+        )
+        updated_secrets = replace(secrets, profiles=(*secrets.profiles, new_profile))
+        yaml_content = create_secrets_yaml(
+            hostname=config.hostname, secrets=updated_secrets
+        )
+        write_and_encrypt(yaml_content, sops_path)
+    except (RuntimeError, ValueError) as e:
+        return Err(SOPSEncryptError(sops_path, str(e)))
+
+    return Ok(
+        AddRoleResult(
+            hostname=config.hostname,
+            role_name=config.role_name,
+            already_present=False,
+            sops_file_path=sops_path,
+            updated_role_names=new_role_names,
+        )
+    )
+
+
+def remove_role(
+    ctx: AwsContext, config: RemoveRoleConfig
+) -> Result[RemoveRoleResult, RemoveRoleError]:
+    """Detach a role from an existing host.
+
+    Does NOT destroy the cert or host stack. Updates state and rewrites
+    the SOPS file without the removed profile.
+
+    Preconditions:
+        - Namespace initialised.
+        - Host exists.
+        - Role is attached (if not, returns already_absent=True).
+        - At least one role remains after removal. To remove a host
+          entirely use `iam-ra host offboard` instead.
+
+    Idempotent: removing a role that isn't attached returns Ok with
+    already_absent=True and does not rewrite the SOPS file.
+    """
+    # Load state
+    match state_module.load(ctx.ssm, ctx.s3, config.namespace):
+        case Err(e):
+            return Err(e)
+        case Ok(None):
+            return Err(NotInitializedError(config.namespace))
+        case Ok(state):
+            pass
+
+    if not state.is_initialized:
+        return Err(NotInitializedError(config.namespace))
+
+    # Host must exist
+    if config.hostname not in state.hosts:
+        return Err(HostNotFoundError(config.namespace, config.hostname))
+    host = state.hosts[config.hostname]
+
+    # Resolve SOPS path up-front
+    match _resolve_sops_path(config.hostname, config.sops_path):
+        case Err(e):
+            return Err(e)
+        case Ok(sops_path):
+            pass
+
+    # Idempotency: role not attached -> no-op success
+    if config.role_name not in host.role_names:
+        return Ok(
+            RemoveRoleResult(
+                hostname=config.hostname,
+                role_name=config.role_name,
+                already_absent=True,
+                sops_file_path=sops_path,
+                updated_role_names=host.role_names,
+            )
+        )
+
+    # Can't remove the last role - would leave the host useless
+    if len(host.role_names) == 1:
+        return Err(
+            CannotRemoveLastRoleError(
+                namespace=config.namespace,
+                hostname=config.hostname,
+                role_name=config.role_name,
+            )
+        )
+
+    # Update state: drop the role
+    new_role_names = tuple(r for r in host.role_names if r != config.role_name)
+    updated_host = replace(host, role_names=new_role_names)
+    state.hosts[config.hostname] = updated_host
+
+    match state_module.save(ctx.ssm, ctx.s3, state):
+        case Err() as e:
+            return e
+        case Ok(_):
+            pass
+
+    # Read SOPS, drop the profile entry, write back
+    try:
+        decrypted = decrypt_file(sops_path)
+        secrets = parse_secrets_yaml(decrypted)
+        remaining = tuple(p for p in secrets.profiles if p.role_name != config.role_name)
+        updated_secrets = replace(secrets, profiles=remaining)
+        yaml_content = create_secrets_yaml(
+            hostname=config.hostname, secrets=updated_secrets
+        )
+        write_and_encrypt(yaml_content, sops_path)
+    except (RuntimeError, ValueError) as e:
+        return Err(SOPSEncryptError(sops_path, str(e)))
+
+    return Ok(
+        RemoveRoleResult(
+            hostname=config.hostname,
+            role_name=config.role_name,
+            already_absent=False,
+            sops_file_path=sops_path,
+            updated_role_names=new_role_names,
+        )
+    )

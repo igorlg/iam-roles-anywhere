@@ -16,15 +16,26 @@ from moto import mock_aws
 
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    CannotRemoveLastRoleError,
     CAScopeNotFoundError,
+    HostNotFoundError,
     NotInitializedError,
     RoleNotFoundError,
+    RoleScopeMismatchError,
 )
 from iam_ra_cli.lib.result import Err, Ok
-from iam_ra_cli.models import CA, Arn, CAMode, Host, Init, Role, State
+from iam_ra_cli.lib.sops import SopsProfile, SopsSecrets
+from iam_ra_cli.models import CA, Arn, CAMode, Host, Init, NamespaceInfo, Role, State
 from iam_ra_cli.operations.host import HostResult
 from iam_ra_cli.operations.secrets import SecretsFileResult
-from iam_ra_cli.workflows.host import OnboardConfig, onboard
+from iam_ra_cli.workflows.host import (
+    AddRoleConfig,
+    OnboardConfig,
+    RemoveRoleConfig,
+    add_role,
+    onboard,
+    remove_role,
+)
 
 
 # =============================================================================
@@ -557,3 +568,507 @@ class TestOnboardResultFields:
             assert isinstance(result, Ok)
             assert "ta-certmgr" in str(result.value.trust_anchor_arn)
             assert "ta-default" not in str(result.value.trust_anchor_arn)
+
+
+# =============================================================================
+# add_role workflow (scenario 2: attach another role to an existing host
+# without issuing a new cert)
+# =============================================================================
+
+
+def _state_with_existing_host(host_role_names: tuple[str, ...] = ("admin",)) -> State:
+    """State with a host already onboarded with given roles.
+
+    Includes two extra roles ready to be added: `readonly` (same scope,
+    valid add) and `cross-scope` (different scope, invalid add).
+    """
+    return State(
+        namespace="test",
+        region="ap-southeast-2",
+        version="2.5.0",
+        namespace_info=NamespaceInfo(
+            account_id="123456789012",
+            region="ap-southeast-2",
+        ),
+        init=Init(
+            stack_name="iam-ra-test-init",
+            bucket_arn=Arn("arn:aws:s3:::test-bucket"),
+            kms_key_arn=Arn("arn:aws:kms:ap-southeast-2:123456789012:key/test-key"),
+        ),
+        cas={
+            "default": CA(
+                stack_name="iam-ra-test-ca-default",
+                mode=CAMode.SELF_SIGNED,
+                trust_anchor_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-default"
+                ),
+                account_id="123456789012",
+            ),
+            "other-scope": CA(
+                stack_name="iam-ra-test-ca-other-scope",
+                mode=CAMode.SELF_SIGNED,
+                trust_anchor_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-other"
+                ),
+                account_id="123456789012",
+            ),
+        },
+        roles={
+            "admin": Role(
+                stack_name="iam-ra-test-role-admin",
+                role_arn=Arn("arn:aws:iam::123456789012:role/admin"),
+                profile_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin"
+                ),
+                scope="default",
+            ),
+            "readonly": Role(
+                stack_name="iam-ra-test-role-readonly",
+                role_arn=Arn("arn:aws:iam::123456789012:role/readonly"),
+                profile_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/readonly"
+                ),
+                scope="default",
+            ),
+            "cross-scope": Role(
+                stack_name="iam-ra-test-role-cross-scope",
+                role_arn=Arn("arn:aws:iam::123456789012:role/cross-scope"),
+                profile_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/cross-scope"
+                ),
+                scope="other-scope",
+            ),
+        },
+        hosts={
+            "myhost": Host(
+                stack_name="iam-ra-test-host-myhost",
+                hostname="myhost",
+                role_names=host_role_names,
+                scope="default",
+                certificate_secret_arn=Arn(
+                    "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:cert"
+                ),
+                private_key_secret_arn=Arn(
+                    "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:key"
+                ),
+            ),
+        },
+    )
+
+
+def _setup_state_in_s3(ctx: AwsContext, state: State) -> None:
+    """Helper: store state in mocked S3/SSM."""
+    bucket = "test-bucket"
+    key = f"{state.namespace}/state.json"
+    ctx.s3.create_bucket(
+        Bucket=bucket,
+        CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"},
+    )
+    ctx.s3.put_object(Bucket=bucket, Key=key, Body=state.to_json().encode("utf-8"))
+    ctx.ssm.put_parameter(
+        Name=f"/iam-ra/{state.namespace}/state-location",
+        Value=f"s3://{bucket}/{key}",
+        Type="String",
+    )
+
+
+def _mock_existing_sops(admin_only: bool = True) -> SopsSecrets:
+    """A realistic SopsSecrets as would be read from the SOPS file on disk.
+
+    Default is the single-role (admin) case that matches the host fixture.
+    """
+    profiles = [
+        SopsProfile(
+            role_name="admin",
+            profile_arn="arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin",
+            role_arn="arn:aws:iam::123456789012:role/admin",
+        ),
+    ]
+    if not admin_only:
+        profiles.append(
+            SopsProfile(
+                role_name="readonly",
+                profile_arn=(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/readonly"
+                ),
+                role_arn="arn:aws:iam::123456789012:role/readonly",
+            )
+        )
+    return SopsSecrets(
+        certificate="CERT",
+        private_key="KEY",
+        trust_anchor_arn=(
+            "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-default"
+        ),
+        account_id="123456789012",
+        region="ap-southeast-2",
+        profiles=tuple(profiles),
+    )
+
+
+class TestAddRoleSuccess:
+    """add_role adds a role to an existing host without reissuing a cert."""
+
+    def test_adds_role_to_state(self, aws_credentials, temp_xdg_dirs) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.decrypt_file",
+                    return_value="<decrypted yaml>",
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.parse_secrets_yaml",
+                    return_value=_mock_existing_sops(),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.write_and_encrypt",
+                    return_value=None,
+                ),
+            ):
+                result = add_role(
+                    ctx,
+                    AddRoleConfig(
+                        namespace="test",
+                        hostname="myhost",
+                        role_name="readonly",
+                    ),
+                )
+
+            assert isinstance(result, Ok)
+            assert set(result.value.updated_role_names) == {"admin", "readonly"}
+            assert result.value.already_present is False
+
+    def test_adds_role_to_sops_file(self, aws_credentials, temp_xdg_dirs) -> None:
+        """The new profile must be appended to the SOPS file."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            captured_yaml = {}
+
+            def capture_write(content: str, path: Path, *a, **k) -> None:
+                captured_yaml["content"] = content
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.decrypt_file",
+                    return_value="<decrypted yaml>",
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.parse_secrets_yaml",
+                    return_value=_mock_existing_sops(),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.write_and_encrypt",
+                    side_effect=capture_write,
+                ),
+            ):
+                result = add_role(
+                    ctx,
+                    AddRoleConfig(
+                        namespace="test",
+                        hostname="myhost",
+                        role_name="readonly",
+                    ),
+                )
+
+            assert isinstance(result, Ok)
+            # The YAML content written back should mention both roles
+            assert "admin" in captured_yaml["content"]
+            assert "readonly" in captured_yaml["content"]
+            # Specifically the new role's ARN
+            assert "role/readonly" in captured_yaml["content"]
+
+    def test_state_persists_new_role_list(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """After add_role, loading state should return the host with both roles."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            with (
+                patch("iam_ra_cli.workflows.host.decrypt_file", return_value="y"),
+                patch(
+                    "iam_ra_cli.workflows.host.parse_secrets_yaml",
+                    return_value=_mock_existing_sops(),
+                ),
+                patch("iam_ra_cli.workflows.host.write_and_encrypt"),
+            ):
+                result = add_role(
+                    ctx,
+                    AddRoleConfig(
+                        namespace="test", hostname="myhost", role_name="readonly"
+                    ),
+                )
+
+            assert isinstance(result, Ok)
+
+            # Verify the state persisted. We bypass cache to re-read from S3.
+            from iam_ra_cli.lib import state as state_module
+
+            loaded = state_module.load(ctx.ssm, ctx.s3, "test", skip_cache=True)
+            assert isinstance(loaded, Ok) and loaded.value is not None
+            assert set(loaded.value.hosts["myhost"].role_names) == {
+                "admin",
+                "readonly",
+            }
+
+
+class TestAddRoleIdempotent:
+    """Re-running add_role with an already-attached role is a no-op (ok)."""
+
+    def test_idempotent_returns_already_present(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            with (
+                patch("iam_ra_cli.workflows.host.decrypt_file", return_value="y"),
+                patch(
+                    "iam_ra_cli.workflows.host.parse_secrets_yaml",
+                    return_value=_mock_existing_sops(),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.write_and_encrypt"
+                ) as mock_write,
+            ):
+                result = add_role(
+                    ctx,
+                    AddRoleConfig(
+                        namespace="test",
+                        hostname="myhost",
+                        role_name="admin",
+                    ),
+                )
+
+            assert isinstance(result, Ok)
+            assert result.value.already_present is True
+            # No-op shouldn't rewrite the SOPS file
+            mock_write.assert_not_called()
+
+
+class TestAddRoleErrors:
+    """Validation failures."""
+
+    def test_host_not_found(self, aws_credentials, temp_xdg_dirs) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            result = add_role(
+                ctx,
+                AddRoleConfig(
+                    namespace="test",
+                    hostname="nonexistent-host",
+                    role_name="admin",
+                ),
+            )
+
+            assert isinstance(result, Err)
+            assert isinstance(result.error, HostNotFoundError)
+
+    def test_role_not_found(self, aws_credentials, temp_xdg_dirs) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            result = add_role(
+                ctx,
+                AddRoleConfig(
+                    namespace="test",
+                    hostname="myhost",
+                    role_name="nonexistent-role",
+                ),
+            )
+
+            assert isinstance(result, Err)
+            assert isinstance(result.error, RoleNotFoundError)
+
+    def test_scope_mismatch_rejected(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """Role and host in different scopes -> explicit rejection."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            result = add_role(
+                ctx,
+                AddRoleConfig(
+                    namespace="test",
+                    hostname="myhost",
+                    role_name="cross-scope",
+                ),
+            )
+
+            assert isinstance(result, Err)
+            assert isinstance(result.error, RoleScopeMismatchError)
+            assert result.error.host_scope == "default"
+            assert result.error.role_scope == "other-scope"
+
+    def test_not_initialized(self, aws_credentials, temp_xdg_dirs) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+
+            result = add_role(
+                ctx,
+                AddRoleConfig(
+                    namespace="fresh",
+                    hostname="myhost",
+                    role_name="admin",
+                ),
+            )
+
+            assert isinstance(result, Err)
+            assert isinstance(result.error, NotInitializedError)
+
+
+# =============================================================================
+# remove_role workflow
+# =============================================================================
+
+
+class TestRemoveRoleSuccess:
+    def test_removes_role_from_state(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(
+                ctx,
+                _state_with_existing_host(host_role_names=("admin", "readonly")),
+            )
+
+            with (
+                patch("iam_ra_cli.workflows.host.decrypt_file", return_value="y"),
+                patch(
+                    "iam_ra_cli.workflows.host.parse_secrets_yaml",
+                    return_value=_mock_existing_sops(admin_only=False),
+                ),
+                patch("iam_ra_cli.workflows.host.write_and_encrypt"),
+            ):
+                result = remove_role(
+                    ctx,
+                    RemoveRoleConfig(
+                        namespace="test", hostname="myhost", role_name="readonly"
+                    ),
+                )
+
+            assert isinstance(result, Ok)
+            assert result.value.updated_role_names == ("admin",)
+            assert result.value.already_absent is False
+
+    def test_removes_from_sops_file(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """The profile should no longer appear in the rewritten SOPS."""
+        captured: dict = {}
+
+        def capture(content: str, path: Path, *a, **k) -> None:
+            captured["content"] = content
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(
+                ctx,
+                _state_with_existing_host(host_role_names=("admin", "readonly")),
+            )
+
+            with (
+                patch("iam_ra_cli.workflows.host.decrypt_file", return_value="y"),
+                patch(
+                    "iam_ra_cli.workflows.host.parse_secrets_yaml",
+                    return_value=_mock_existing_sops(admin_only=False),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.host.write_and_encrypt",
+                    side_effect=capture,
+                ),
+            ):
+                remove_role(
+                    ctx,
+                    RemoveRoleConfig(
+                        namespace="test", hostname="myhost", role_name="readonly"
+                    ),
+                )
+
+            assert "role/readonly" not in captured["content"]
+            assert "role/admin" in captured["content"]
+
+
+class TestRemoveRoleIdempotent:
+    def test_idempotent_returns_already_absent(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """Removing a role that isn't attached is a no-op (ok)."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            with patch(
+                "iam_ra_cli.workflows.host.write_and_encrypt"
+            ) as mock_write:
+                result = remove_role(
+                    ctx,
+                    RemoveRoleConfig(
+                        namespace="test",
+                        hostname="myhost",
+                        role_name="readonly",
+                    ),
+                )
+
+            assert isinstance(result, Ok)
+            assert result.value.already_absent is True
+            mock_write.assert_not_called()
+
+
+class TestRemoveRoleErrors:
+    def test_host_not_found(self, aws_credentials, temp_xdg_dirs) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, _state_with_existing_host())
+
+            result = remove_role(
+                ctx,
+                RemoveRoleConfig(
+                    namespace="test",
+                    hostname="nope",
+                    role_name="admin",
+                ),
+            )
+
+            assert isinstance(result, Err)
+            assert isinstance(result.error, HostNotFoundError)
+
+    def test_cannot_remove_last_role(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """Removing the only role should fail with CannotRemoveLastRoleError.
+
+        Leaving a host with zero roles is worse than leaving it with one;
+        the user should offboard the host entirely instead.
+        """
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(
+                ctx,
+                _state_with_existing_host(host_role_names=("admin",)),
+            )
+
+            result = remove_role(
+                ctx,
+                RemoveRoleConfig(
+                    namespace="test",
+                    hostname="myhost",
+                    role_name="admin",
+                ),
+            )
+
+            assert isinstance(result, Err)
+            assert isinstance(result.error, CannotRemoveLastRoleError)

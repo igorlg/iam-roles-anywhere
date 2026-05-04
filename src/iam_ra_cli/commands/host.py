@@ -15,7 +15,14 @@ from iam_ra_cli.commands.common import (
 )
 from iam_ra_cli.lib.sops import get_nix_repo_root
 from iam_ra_cli.workflows import list_hosts, offboard, onboard
-from iam_ra_cli.workflows.host import OnboardConfig, OnboardResult
+from iam_ra_cli.workflows.host import (
+    AddRoleConfig,
+    OnboardConfig,
+    OnboardResult,
+    RemoveRoleConfig,
+    add_role,
+    remove_role,
+)
 
 # Keys written into the SOPS file by operations/secrets.py::create_secrets_file.
 # Kept in sync with lib/sops.py::create_secrets_yaml.
@@ -458,3 +465,183 @@ def host_list(
         echo_key_value("Scope", h.scope, indent=2)
         echo_key_value("Stack", h.stack_name, indent=2)
         click.echo()
+
+
+@host.command("add-role")
+@click.argument("hostname")
+@click.argument("role_name")
+@namespace_option
+@aws_options
+@click.option(
+    "--sops-output",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Override the SOPS file path. Defaults to "
+        "secrets/hosts/<hostname>/iam-ra.yaml relative to the Nix flake root."
+    ),
+)
+@json_option
+def host_add_role(
+    hostname: str,
+    role_name: str,
+    namespace: str,
+    region: str,
+    profile: str | None,
+    sops_output: str | None,
+    as_json: bool,
+) -> None:
+    """Attach another role to an existing host (no new cert issued).
+
+    The role must live in the same scope as the host's existing cert (same
+    trust anchor, same account). For cross-scope / cross-account hosts use
+    the multi-identity workflow (scenario 3).
+
+    \b
+    Examples:
+      iam-ra host add-role myhost readonly
+      iam-ra host add-role myhost deploy --namespace prod
+    """
+    if not as_json:
+        click.echo(f"Adding role to host: {hostname}")
+        echo_key_value("Namespace", namespace, indent=1)
+        echo_key_value("Role", role_name, indent=1)
+        click.echo()
+
+    ctx = make_context(region, profile)
+    config = AddRoleConfig(
+        namespace=namespace,
+        hostname=hostname,
+        role_name=role_name,
+        sops_path=Path(sops_output) if sops_output else None,
+    )
+
+    result = handle_result(
+        add_role(ctx, config),
+        success_message=(
+            None
+            if as_json
+            else f"Role '{role_name}' attached to host '{hostname}'."
+        ),
+        as_json=as_json,
+    )
+
+    if as_json:
+        # Schema: { schema_version, hostname, role_name, already_present,
+        #           sops_file_path, updated_role_names: [str, ...] }
+        click.echo(
+            render_json(
+                {
+                    "hostname": result.hostname,
+                    "role_name": result.role_name,
+                    "already_present": result.already_present,
+                    "sops_file_path": str(result.sops_file_path),
+                    "updated_role_names": list(result.updated_role_names),
+                }
+            )
+        )
+        return
+
+    # Human output
+    if result.already_present:
+        click.echo(
+            f"  Role '{result.role_name}' was already attached to this host. "
+            f"No changes."
+        )
+    else:
+        click.echo("  SOPS file updated with the new profile.")
+    click.echo()
+    echo_key_value("SOPS file", str(result.sops_file_path), indent=1)
+    echo_key_value(
+        "Roles now attached", ", ".join(result.updated_role_names), indent=1
+    )
+
+
+@host.command("remove-role")
+@click.argument("hostname")
+@click.argument("role_name")
+@namespace_option
+@aws_options
+@click.option(
+    "--sops-output",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Override the SOPS file path. Defaults to "
+        "secrets/hosts/<hostname>/iam-ra.yaml relative to the Nix flake root."
+    ),
+)
+@json_option
+def host_remove_role(
+    hostname: str,
+    role_name: str,
+    namespace: str,
+    region: str,
+    profile: str | None,
+    sops_output: str | None,
+    as_json: bool,
+) -> None:
+    """Detach a role from a host (does NOT destroy the host).
+
+    Fails if this would remove the host's last role - use
+    'iam-ra host offboard' to remove the host entirely.
+
+    \b
+    Examples:
+      iam-ra host remove-role myhost readonly
+      iam-ra host remove-role myhost deploy --namespace prod
+    """
+    if not as_json:
+        click.echo(f"Removing role from host: {hostname}")
+        echo_key_value("Namespace", namespace, indent=1)
+        echo_key_value("Role", role_name, indent=1)
+        click.echo()
+
+    ctx = make_context(region, profile)
+    config = RemoveRoleConfig(
+        namespace=namespace,
+        hostname=hostname,
+        role_name=role_name,
+        sops_path=Path(sops_output) if sops_output else None,
+    )
+
+    result = handle_result(
+        remove_role(ctx, config),
+        success_message=(
+            None
+            if as_json
+            else f"Role '{role_name}' detached from host '{hostname}'."
+        ),
+        as_json=as_json,
+    )
+
+    if as_json:
+        # Schema: { schema_version, hostname, role_name, already_absent,
+        #           sops_file_path, updated_role_names: [str, ...] }
+        click.echo(
+            render_json(
+                {
+                    "hostname": result.hostname,
+                    "role_name": result.role_name,
+                    "already_absent": result.already_absent,
+                    "sops_file_path": str(result.sops_file_path),
+                    "updated_role_names": list(result.updated_role_names),
+                }
+            )
+        )
+        return
+
+    if result.already_absent:
+        click.echo(
+            f"  Role '{result.role_name}' wasn't attached to this host. "
+            f"No changes."
+        )
+    else:
+        click.echo("  SOPS file updated; profile removed.")
+    click.echo()
+    echo_key_value("SOPS file", str(result.sops_file_path), indent=1)
+    echo_key_value(
+        "Roles now attached",
+        ", ".join(result.updated_role_names) or "(none)",
+        indent=1,
+    )
