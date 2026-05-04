@@ -7,7 +7,7 @@
 # Architecture:
 #   module-options.nix     → Option definitions (the API surface)
 #   module-packages.nix    → Package installation
-#   module-aws-profile.nix → AWS CLI profile configuration (multi-profile)
+#   module-aws-profile.nix → AWS CLI profile configuration (multi-identity)
 #   module-validation.nix  → ARN validation and warnings
 #   module.nix             → This file (orchestration)
 { lib }:
@@ -23,11 +23,23 @@ let
   # Usage:
   #   programs.iamRolesAnywhere = {
   #     enable = true;
-  #     certificate.certPath = "/path/to/cert.pem";
-  #     trustAnchorArn = "arn:aws:rolesanywhere:...";
-  #     region = "ap-southeast-2";
-  #     profiles = {
-  #       admin = { profileArn = "..."; roleArn = "..."; };
+  #     identities.default = {
+  #       certificate.certPath = "/path/to/cert.pem";
+  #       certificate.keyPath  = "/path/to/key.pem";
+  #       trustAnchorArn = "arn:aws:rolesanywhere:...";
+  #       region = "ap-southeast-2";
+  #       profiles = {
+  #         admin = { profileArn = "..."; roleArn = "..."; };
+  #       };
+  #     };
+  #   };
+  #
+  # Multi-identity (cross-account):
+  #   programs.iamRolesAnywhere = {
+  #     enable = true;
+  #     identities = {
+  #       work     = { certificate = {...}; trustAnchorArn = "..."; region = "..."; profiles = {...}; };
+  #       personal = { certificate = {...}; trustAnchorArn = "..."; region = "..."; profiles = {...}; };
   #     };
   #   };
 
@@ -71,12 +83,15 @@ let
   #   programs.iamRolesAnywhere = {
   #     enable = true;
   #     user = "alice";
-  #     certificate.certPath = config.sops.secrets."iam-ra/cert".path;
-  #     trustAnchorArn = "arn:aws:rolesanywhere:...";
-  #     region = "ap-southeast-2";
-  #     profiles = {
-  #       admin = { profileArn = "..."; roleArn = "..."; makeDefault = true; };
-  #       readonly = { profileArn = "..."; roleArn = "..."; };
+  #     identities.default = {
+  #       certificate.certPath = config.sops.secrets."iam-ra/cert".path;
+  #       certificate.keyPath  = config.sops.secrets."iam-ra/key".path;
+  #       trustAnchorArn = "arn:aws:rolesanywhere:...";
+  #       region = "ap-southeast-2";
+  #       profiles = {
+  #         admin    = { profileArn = "..."; roleArn = "..."; makeDefault = true; };
+  #         readonly = { profileArn = "..."; roleArn = "..."; };
+  #       };
   #     };
   #   };
 
@@ -100,21 +115,15 @@ let
       };
 
       config = lib.mkIf cfg.enable {
-        # Wire the home module to the specified user via home-manager
+        # Wire the home module to the specified user via home-manager.
+        # With identities as a single attrset the wiring is trivial - no
+        # manual per-option unpacking required.
         home-manager.users.${cfg.user} = {
           imports = [ homeModule ];
 
           programs.iamRolesAnywhere = {
             enable = true;
-            certificate = {
-              inherit (cfg.certificate) certPath keyPath;
-            };
-            inherit (cfg)
-              trustAnchorArn
-              region
-              sessionDuration
-              profiles
-              ;
+            inherit (cfg) identities;
           };
         };
 

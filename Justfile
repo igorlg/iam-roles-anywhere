@@ -17,11 +17,11 @@ dev:
 
 # Format all Nix files
 fmt:
-    nix fmt
+    nix fmt -- $(git ls-files '*.nix')
 
 # Check formatting without modifying
 fmt-check:
-    nix fmt -- --check .
+    nix fmt -- --check $(git ls-files '*.nix')
 
 # ===================
 # TESTING

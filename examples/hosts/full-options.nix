@@ -1,85 +1,96 @@
 # Full Options Example
 #
-# Demonstrates all available configuration options.
-# Use this as a reference for what's possible.
+# Demonstrates all available configuration options for a single
+# identity. For multi-identity (cross-account) setups see
+# ./multi-identity.nix.
+#
+# The module is organised around identities: each identity owns a
+# cert, trust anchor, region, and set of profiles. Profiles within
+# an identity share the cert.
 #
 { config, ... }:
 {
-  sops.secrets."iam-ra/cert".sopsFile = ./secrets/iam-ra.yaml;
-  sops.secrets."iam-ra/key".sopsFile = ./secrets/iam-ra.yaml;
+  sops.secrets."iam-ra/cert".sopsFile = ./secrets/iam-ra-default.yaml;
+  sops.secrets."iam-ra/key".sopsFile = ./secrets/iam-ra-default.yaml;
 
   programs.iamRolesAnywhere = {
     enable = true;
     user = "alice";
 
-    # Certificate configuration
-    certificate = {
-      certPath = config.sops.secrets."iam-ra/cert".path;
-      keyPath = config.sops.secrets."iam-ra/key".path;
-    };
-
-    # AWS configuration
-    trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/abc123";
-    region = "ap-southeast-2";
-
-    # Global session duration (seconds)
-    # This is the default for all profiles unless overridden
-    sessionDuration = 3600; # 1 hour
-
-    # Profile definitions
-    profiles = {
-      # Example 1: Simple profile with custom AWS profile name
-      production = {
-        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/prod-profile";
-        roleArn = "arn:aws:iam::123456789012:role/iam-ra-production";
-
-        # Use a different name in ~/.aws/config
-        awsProfileName = "prod";
-
-        # Make this the [default] profile
-        makeDefault = false;
+    identities.default = {
+      # Certificate configuration (shared across all profiles in this
+      # identity).
+      certificate = {
+        certPath = config.sops.secrets."iam-ra/cert".path;
+        keyPath = config.sops.secrets."iam-ra/key".path;
       };
 
-      # Example 2: Profile with all options
-      admin = {
-        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin-profile";
-        roleArn = "arn:aws:iam::123456789012:role/iam-ra-admin";
+      # AWS configuration for this identity
+      trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/abc123";
+      region = "ap-southeast-2";
 
-        # AWS profile name (defaults to the attribute name "admin")
-        awsProfileName = "admin";
+      # Identity-level default session duration (seconds). Individual
+      # profiles can override this via their own sessionDuration.
+      sessionDuration = 3600; # 1 hour
 
-        # Whether to also create [default] profile with same settings
-        makeDefault = true;
+      # Profile definitions - one per IAM role this identity can assume
+      profiles = {
+        # Example 1: Simple profile with custom AWS CLI profile name
+        production = {
+          profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/prod-profile";
+          roleArn = "arn:aws:iam::123456789012:role/iam-ra-production";
 
-        # Override session duration for this profile
-        sessionDuration = 900; # 15 minutes
+          # Use a different name in ~/.aws/config
+          awsProfileName = "prod";
 
-        # AWS CLI output format
-        output = "json"; # or "yaml", "text", "table"
-
-        # Additional AWS config options
-        extraConfig = {
-          cli_pager = ""; # Disable pager
-          retry_mode = "standard";
-          max_attempts = "3";
+          # Not the default - "prod" never should be (user must opt in)
+          makeDefault = false;
         };
-      };
 
-      # Example 3: Read-only profile with short sessions
-      readonly = {
-        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/readonly-profile";
-        roleArn = "arn:aws:iam::123456789012:role/iam-ra-readonly";
-        output = "table"; # Nice for interactive use
-      };
+        # Example 2: Profile with all options set explicitly
+        admin = {
+          profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin-profile";
+          roleArn = "arn:aws:iam::123456789012:role/iam-ra-admin";
 
-      # Example 4: Deploy profile for CI/CD
-      deploy = {
-        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/deploy-profile";
-        roleArn = "arn:aws:iam::123456789012:role/iam-ra-deploy";
-        sessionDuration = 7200; # 2 hours for long deployments
-        output = "json";
-        extraConfig = {
-          cli_pager = "";
+          # AWS profile name (defaults to the attribute name "admin").
+          # Must be unique across ALL identities in the full
+          # programs.iamRolesAnywhere config.
+          awsProfileName = "admin";
+
+          # At most ONE profile across ALL identities may set this.
+          makeDefault = true;
+
+          # Override the identity-level session duration
+          sessionDuration = 900; # 15 minutes
+
+          # AWS CLI output format
+          output = "json"; # or "yaml", "text", "table"
+
+          # Additional AWS config options written verbatim into
+          # [profile admin] in ~/.aws/config
+          extraConfig = {
+            cli_pager = ""; # Disable pager
+            retry_mode = "standard";
+            max_attempts = "3";
+          };
+        };
+
+        # Example 3: Read-only profile using identity's default duration
+        readonly = {
+          profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/readonly-profile";
+          roleArn = "arn:aws:iam::123456789012:role/iam-ra-readonly";
+          output = "table"; # Nice for interactive use
+        };
+
+        # Example 4: Deploy profile for CI/CD
+        deploy = {
+          profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/deploy-profile";
+          roleArn = "arn:aws:iam::123456789012:role/iam-ra-deploy";
+          sessionDuration = 7200; # 2 hours for long deployments
+          output = "json";
+          extraConfig = {
+            cli_pager = "";
+          };
         };
       };
     };

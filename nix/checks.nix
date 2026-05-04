@@ -12,15 +12,21 @@ let
   # Sample ARNs for testing (not real)
   testArns = {
     trustAnchor = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/00000000-0000-0000-0000-000000000001";
+    trustAnchorPersonal = "arn:aws:rolesanywhere:ap-southeast-2:987098549565:trust-anchor/00000000-0000-0000-0000-0000000000aa";
     profile = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/00000000-0000-0000-0000-000000000002";
     profileAdmin = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/00000000-0000-0000-0000-000000000003";
     profileReadonly = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/00000000-0000-0000-0000-000000000004";
+    profilePersonal = "arn:aws:rolesanywhere:ap-southeast-2:987098549565:profile/00000000-0000-0000-0000-0000000000bb";
     role = "arn:aws:iam::123456789012:role/test-host-rolesanywhere";
     roleAdmin = "arn:aws:iam::123456789012:role/admin";
     roleReadonly = "arn:aws:iam::123456789012:role/readonly";
+    rolePersonal = "arn:aws:iam::987098549565:role/personal-admin";
   };
 
-  # Helper to create test home-manager configurations
+  # Helper to create test home-manager configurations.
+  # Returns the full activationPackage - forcing its realisation forces
+  # assertion evaluation, so these tests double as assertion checks for
+  # the happy paths.
   mkTestHome =
     {
       extraConfig ? { },
@@ -39,6 +45,51 @@ let
         extraConfig
       ];
     }).activationPackage;
+
+  # Helper to assert that a config FAILS to evaluate due to a module
+  # assertion firing. Home-manager converts `config.assertions` with
+  # any assertion=false into a `throw` via `throwAssertions`, which
+  # fires when `.activationPackage` is forced. `builtins.tryEval`
+  # catches that throw; `success = false` means an assertion fired.
+  #
+  # We intentionally don't grep the error message - tryEval doesn't
+  # expose it, and the specific assertion that SHOULD fire is
+  # documented next to each test invocation below. The implied
+  # assertion identity is the one unique to the test's config shape
+  # (e.g. empty identities -> "At least one identity" assertion).
+  mkAssertionFailsTest =
+    name: extraConfig:
+    let
+      hmAttempt = builtins.tryEval (
+        (inputs.home-manager.lib.homeManagerConfiguration {
+          inherit pkgs;
+          modules = [
+            self.homeModules.default
+            {
+              home = {
+                username = "testuser";
+                homeDirectory = if pkgs.stdenv.isDarwin then "/Users/testuser" else "/home/testuser";
+                stateVersion = "24.11";
+              };
+            }
+            extraConfig
+          ];
+        }).activationPackage
+      );
+    in
+    pkgs.runCommand name { } (
+      if !hmAttempt.success then
+        ''
+          echo "PASS: module eval failed as expected (assertion fired)"
+          mkdir -p $out
+          echo PASS > $out/result
+        ''
+      else
+        ''
+          echo "FAIL: expected eval to fail but it succeeded"
+          exit 1
+        ''
+    );
 
   # ===================
   # Library Tests
@@ -190,7 +241,7 @@ let
   '';
 
   # ===================
-  # Home Module Config Tests
+  # Home Module Config Tests (identities attrset - happy paths)
   # ===================
 
   # Module disabled by default
@@ -200,19 +251,19 @@ let
     };
   };
 
-  # Single profile configuration
+  # Single identity with one profile - the common case for a single-account host
   test-home-single-profile = mkTestHome {
     extraConfig = {
       programs.iamRolesAnywhere = {
         enable = true;
-        trustAnchorArn = testArns.trustAnchor;
-        region = "ap-southeast-2";
-        certificate = {
-          certPath = "/run/secrets/cert.pem";
-          keyPath = "/run/secrets/key.pem";
-        };
-        profiles = {
-          default = {
+        identities.default = {
+          trustAnchorArn = testArns.trustAnchor;
+          region = "ap-southeast-2";
+          certificate = {
+            certPath = "/run/secrets/cert.pem";
+            keyPath = "/run/secrets/key.pem";
+          };
+          profiles.default = {
             profileArn = testArns.profile;
             roleArn = testArns.role;
             makeDefault = true;
@@ -222,65 +273,206 @@ let
     };
   };
 
-  # Multi-profile configuration
+  # Single identity with multiple profiles (scenario 2 - same cert, many roles)
   test-home-multi-profile = mkTestHome {
     extraConfig = {
       programs.iamRolesAnywhere = {
         enable = true;
-        trustAnchorArn = testArns.trustAnchor;
-        region = "ap-southeast-2";
-        certificate = {
-          certPath = "/run/secrets/cert.pem";
-          keyPath = "/run/secrets/key.pem";
-        };
-        profiles = {
-          admin = {
-            profileArn = testArns.profileAdmin;
-            roleArn = testArns.roleAdmin;
-            makeDefault = true;
+        identities.default = {
+          trustAnchorArn = testArns.trustAnchor;
+          region = "ap-southeast-2";
+          certificate = {
+            certPath = "/run/secrets/cert.pem";
+            keyPath = "/run/secrets/key.pem";
           };
-          readonly = {
-            profileArn = testArns.profileReadonly;
-            roleArn = testArns.roleReadonly;
+          profiles = {
+            admin = {
+              profileArn = testArns.profileAdmin;
+              roleArn = testArns.roleAdmin;
+              makeDefault = true;
+            };
+            readonly = {
+              profileArn = testArns.profileReadonly;
+              roleArn = testArns.roleReadonly;
+            };
           };
         };
       };
     };
   };
 
-  # Multi-profile with custom settings
+  # Full-options exercise, single identity
   test-home-multi-profile-custom = mkTestHome {
     extraConfig = {
       programs.iamRolesAnywhere = {
         enable = true;
-        trustAnchorArn = testArns.trustAnchor;
-        region = "us-east-1";
-        sessionDuration = 3600;
-        certificate = {
-          certPath = "/custom/path/cert.pem";
-          keyPath = "/custom/path/key.pem";
+        identities.default = {
+          trustAnchorArn = testArns.trustAnchor;
+          region = "us-east-1";
+          sessionDuration = 3600;
+          certificate = {
+            certPath = "/custom/path/cert.pem";
+            keyPath = "/custom/path/key.pem";
+          };
+          profiles = {
+            admin = {
+              profileArn = testArns.profileAdmin;
+              roleArn = testArns.roleAdmin;
+              makeDefault = true;
+              output = "yaml";
+              extraConfig = {
+                cli_pager = "";
+              };
+            };
+            readonly = {
+              profileArn = testArns.profileReadonly;
+              roleArn = testArns.roleReadonly;
+              awsProfileName = "ro"; # Custom profile name
+              sessionDuration = 900; # Override per-identity default
+            };
+            deploy = {
+              profileArn = testArns.profile;
+              roleArn = testArns.role;
+              sessionDuration = 7200;
+              output = "json";
+            };
+          };
         };
-        profiles = {
-          admin = {
+      };
+    };
+  };
+
+  # Multi-identity: scenario 3. Two AWS accounts, two certs, two trust
+  # anchors, three profiles in total. Exactly one makeDefault across
+  # all identities.
+  test-home-multi-identity = mkTestHome {
+    extraConfig = {
+      programs.iamRolesAnywhere = {
+        enable = true;
+        identities = {
+          work = {
+            trustAnchorArn = testArns.trustAnchor;
+            region = "ap-southeast-2";
+            certificate = {
+              certPath = "/run/secrets/iam-ra/work/cert.pem";
+              keyPath = "/run/secrets/iam-ra/work/key.pem";
+            };
+            profiles = {
+              work-admin = {
+                profileArn = testArns.profileAdmin;
+                roleArn = testArns.roleAdmin;
+                makeDefault = true;
+              };
+              work-readonly = {
+                profileArn = testArns.profileReadonly;
+                roleArn = testArns.roleReadonly;
+              };
+            };
+          };
+          personal = {
+            trustAnchorArn = testArns.trustAnchorPersonal;
+            region = "ap-southeast-2";
+            certificate = {
+              certPath = "/run/secrets/iam-ra/personal/cert.pem";
+              keyPath = "/run/secrets/iam-ra/personal/key.pem";
+            };
+            profiles.personal-admin = {
+              profileArn = testArns.profilePersonal;
+              roleArn = testArns.rolePersonal;
+            };
+          };
+        };
+      };
+    };
+  };
+
+  # ===================
+  # Negative Tests (assertion coverage)
+  # ===================
+  # These exercise module-validation.nix assertions by building configs
+  # that SHOULD fail, and assert that evaluation throws. Each test has
+  # a comment naming the specific assertion it's expected to trip -
+  # when you add/rename an assertion, update both the validation file
+  # AND the comment here, so future-you can tell which assertion is
+  # under test.
+
+  # Expected assertion:
+  #   "At least one identity must be defined in 'identities' when the module is enabled"
+  test-empty-identities-fails = mkAssertionFailsTest "test-iam-ra-empty-identities-fails" {
+    programs.iamRolesAnywhere = {
+      enable = true;
+      identities = { };
+    };
+  };
+
+  # Expected assertion:
+  #   "awsProfileName must be unique across all identities"
+  # Two identities, each with a `.profiles.admin` defaulting
+  # awsProfileName to "admin" -> collision.
+  test-duplicate-aws-profile-name-fails =
+    mkAssertionFailsTest "test-iam-ra-duplicate-aws-profile-name-fails"
+      {
+        programs.iamRolesAnywhere = {
+          enable = true;
+          identities = {
+            work = {
+              trustAnchorArn = testArns.trustAnchor;
+              region = "ap-southeast-2";
+              certificate = {
+                certPath = "/run/secrets/work/cert.pem";
+                keyPath = "/run/secrets/work/key.pem";
+              };
+              profiles.admin = {
+                profileArn = testArns.profileAdmin;
+                roleArn = testArns.roleAdmin;
+              };
+            };
+            personal = {
+              trustAnchorArn = testArns.trustAnchorPersonal;
+              region = "ap-southeast-2";
+              certificate = {
+                certPath = "/run/secrets/personal/cert.pem";
+                keyPath = "/run/secrets/personal/key.pem";
+              };
+              profiles.admin = {
+                profileArn = testArns.profilePersonal;
+                roleArn = testArns.rolePersonal;
+              };
+            };
+          };
+        };
+      };
+
+  # Expected assertion:
+  #   "Only one profile can have makeDefault = true across all identities"
+  test-multiple-make-default-fails = mkAssertionFailsTest "test-iam-ra-multiple-make-default-fails" {
+    programs.iamRolesAnywhere = {
+      enable = true;
+      identities = {
+        work = {
+          trustAnchorArn = testArns.trustAnchor;
+          region = "ap-southeast-2";
+          certificate = {
+            certPath = "/run/secrets/work/cert.pem";
+            keyPath = "/run/secrets/work/key.pem";
+          };
+          profiles.work-admin = {
             profileArn = testArns.profileAdmin;
             roleArn = testArns.roleAdmin;
             makeDefault = true;
-            output = "yaml";
-            extraConfig = {
-              cli_pager = "";
-            };
           };
-          readonly = {
-            profileArn = testArns.profileReadonly;
-            roleArn = testArns.roleReadonly;
-            awsProfileName = "ro"; # Custom profile name
-            sessionDuration = 900; # Override global
+        };
+        personal = {
+          trustAnchorArn = testArns.trustAnchorPersonal;
+          region = "ap-southeast-2";
+          certificate = {
+            certPath = "/run/secrets/personal/cert.pem";
+            keyPath = "/run/secrets/personal/key.pem";
           };
-          deploy = {
-            profileArn = testArns.profile;
-            roleArn = testArns.role;
-            sessionDuration = 7200;
-            output = "json";
+          profiles.personal-admin = {
+            profileArn = testArns.profilePersonal;
+            roleArn = testArns.rolePersonal;
+            makeDefault = true;
           };
         };
       };
@@ -299,9 +491,15 @@ in
   iam-ra-nixos-module-exists = test-nixos-module-exists;
   iam-ra-darwin-module-exists = test-darwin-module-exists;
 
-  # Home module config tests
+  # Home module config tests (positive)
   iam-ra-home-disabled = test-home-disabled;
   iam-ra-home-single-profile = test-home-single-profile;
   iam-ra-home-multi-profile = test-home-multi-profile;
   iam-ra-home-multi-profile-custom = test-home-multi-profile-custom;
+  iam-ra-home-multi-identity = test-home-multi-identity;
+
+  # Validation assertion tests (negative - config SHOULD fail)
+  iam-ra-empty-identities-fails = test-empty-identities-fails;
+  iam-ra-duplicate-aws-profile-name-fails = test-duplicate-aws-profile-name-fails;
+  iam-ra-multiple-make-default-fails = test-multiple-make-default-fails;
 }

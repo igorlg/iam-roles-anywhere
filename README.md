@@ -87,7 +87,7 @@ iam-ra host onboard myhost --role admin
 This creates:
 
 - Host CloudFormation stack with certificate in Secrets Manager
-- SOPS-encrypted secrets file: `secrets/hosts/myhost/iam-ra.yaml`
+- SOPS-encrypted secrets file: `secrets/hosts/myhost/iam-ra-default.yaml`
 
 ### 4. Configure Host in Nix
 
@@ -97,33 +97,36 @@ This creates:
   imports = [ inputs.iam-roles-anywhere.nixosModules.default ];
 
   # Configure secrets (example with SOPS)
-  sops.secrets."iam-ra/cert".sopsFile = ./secrets/hosts/myhost/iam-ra.yaml;
-  sops.secrets."iam-ra/key".sopsFile = ./secrets/hosts/myhost/iam-ra.yaml;
+  sops.secrets."iam-ra/cert".sopsFile = ./secrets/hosts/myhost/iam-ra-default.yaml;
+  sops.secrets."iam-ra/key".sopsFile = ./secrets/hosts/myhost/iam-ra-default.yaml;
 
   programs.iamRolesAnywhere = {
     enable = true;
     user = "alice";
-    
-    # Certificate (shared across all profiles)
-    certificate = {
-      certPath = config.sops.secrets."iam-ra/cert".path;
-      keyPath = config.sops.secrets."iam-ra/key".path;
-    };
-    
-    # Shared settings
-    trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/...";
-    region = "ap-southeast-2";
-    
-    # Multiple profiles - one host can assume different roles
-    profiles = {
-      admin = {
-        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin";
-        roleArn = "arn:aws:iam::123456789012:role/admin";
-        makeDefault = true;  # Also creates [default] profile
+
+    # Single identity; for cross-account see examples/hosts/multi-identity.nix
+    identities.default = {
+      # Certificate (shared across all profiles in this identity)
+      certificate = {
+        certPath = config.sops.secrets."iam-ra/cert".path;
+        keyPath = config.sops.secrets."iam-ra/key".path;
       };
-      readonly = {
-        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/readonly";
-        roleArn = "arn:aws:iam::123456789012:role/readonly";
+
+      # Identity-level AWS config
+      trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/...";
+      region = "ap-southeast-2";
+
+      # Multiple profiles - one host can assume different roles
+      profiles = {
+        admin = {
+          profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin";
+          roleArn = "arn:aws:iam::123456789012:role/admin";
+          makeDefault = true;  # Also creates [default] profile
+        };
+        readonly = {
+          profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/readonly";
+          roleArn = "arn:aws:iam::123456789012:role/readonly";
+        };
       };
     };
   };
@@ -316,27 +319,32 @@ needs:
 ```nix
 programs.iamRolesAnywhere = {
   enable = true;
-  user = "alice";                    # Required: user to configure
-  
-  certificate = {
-    certPath = "/path/to/cert.pem";  # Any secrets manager path
-    keyPath = "/path/to/key.pem";
-  };
-  
-  trustAnchorArn = "arn:aws:rolesanywhere:...";
-  region = "ap-southeast-2";
-  sessionDuration = 3600;            # Optional: default session duration
-  
-  profiles = {
-    myprofile = {
-      profileArn = "arn:aws:rolesanywhere:...";
-      roleArn = "arn:aws:iam::...:role/...";
-      makeDefault = false;           # Create [default] profile too?
-      awsProfileName = "myprofile";  # Override AWS profile name
-      sessionDuration = 900;         # Override per-profile
-      output = "json";               # json, yaml, text, table
-      extraConfig = {                # Additional AWS config
-        cli_pager = "";
+  user = "alice";                          # Required: user to configure
+
+  # One or more identities. Each = one AWS account / trust anchor / cert.
+  # Most users have a single identity named `default`. For cross-account
+  # setups, see examples/hosts/multi-identity.nix.
+  identities.default = {
+    certificate = {
+      certPath = "/path/to/cert.pem";      # Any secrets manager path
+      keyPath = "/path/to/key.pem";
+    };
+
+    trustAnchorArn = "arn:aws:rolesanywhere:...";
+    region = "ap-southeast-2";
+    sessionDuration = 3600;                # Optional: identity-level default
+
+    profiles = {
+      myprofile = {
+        profileArn = "arn:aws:rolesanywhere:...";
+        roleArn = "arn:aws:iam::...:role/...";
+        makeDefault = false;               # Create [default] profile too?
+        awsProfileName = "myprofile";      # Must be unique across all identities
+        sessionDuration = 900;             # Override identity-level default
+        output = "json";                   # json, yaml, text, table
+        extraConfig = {                    # Additional AWS config
+          cli_pager = "";
+        };
       };
     };
   };
@@ -350,10 +358,12 @@ Same options, but without `user`:
 ```nix
 programs.iamRolesAnywhere = {
   enable = true;
-  certificate = { ... };
-  trustAnchorArn = "...";
-  region = "...";
-  profiles = { ... };
+  identities.default = {
+    certificate = { ... };
+    trustAnchorArn = "...";
+    region = "...";
+    profiles = { ... };
+  };
 };
 ```
 
@@ -365,15 +375,15 @@ The module is **secrets-manager agnostic**. Just provide paths to certificate fi
 
 ```nix
 sops.secrets."iam-ra/cert" = {
-  sopsFile = ./secrets/hosts/myhost/iam-ra.yaml;
+  sopsFile = ./secrets/hosts/myhost/iam-ra-default.yaml;
   key = "certificate";
 };
 sops.secrets."iam-ra/key" = {
-  sopsFile = ./secrets/hosts/myhost/iam-ra.yaml;
+  sopsFile = ./secrets/hosts/myhost/iam-ra-default.yaml;
   key = "private_key";
 };
 
-programs.iamRolesAnywhere.certificate = {
+programs.iamRolesAnywhere.identities.default.certificate = {
   certPath = config.sops.secrets."iam-ra/cert".path;
   keyPath = config.sops.secrets."iam-ra/key".path;
 };
@@ -385,7 +395,7 @@ programs.iamRolesAnywhere.certificate = {
 age.secrets.iam-ra-cert.file = ./secrets/iam-ra-cert.age;
 age.secrets.iam-ra-key.file = ./secrets/iam-ra-key.age;
 
-programs.iamRolesAnywhere.certificate = {
+programs.iamRolesAnywhere.identities.default.certificate = {
   certPath = config.age.secrets.iam-ra-cert.path;
   keyPath = config.age.secrets.iam-ra-key.path;
 };
@@ -394,7 +404,7 @@ programs.iamRolesAnywhere.certificate = {
 ### With Static Files
 
 ```nix
-programs.iamRolesAnywhere.certificate = {
+programs.iamRolesAnywhere.identities.default.certificate = {
   certPath = "/etc/ssl/iam-ra/cert.pem";
   keyPath = "/etc/ssl/iam-ra/key.pem";
 };
@@ -421,7 +431,7 @@ AWS Account
 Local
 ├── ~/.local/share/iam-ra/
 │   └── {namespace}/ca-private-key.pem  (self-signed CA only)
-└── secrets/hosts/{hostname}/iam-ra.yaml (SOPS-encrypted)
+└── secrets/hosts/{hostname}/iam-ra-{namespace}.yaml (SOPS-encrypted)
 
 Host
 ├── /run/secrets/iam-ra/*  (deployed by secrets manager)
@@ -444,7 +454,7 @@ iam-roles-anywhere/
 │   ├── package.nix           # CLI package (uv2nix)
 │   ├── module.nix            # Module exports
 │   ├── module-options.nix    # Option definitions
-│   ├── module-aws-profile.nix # Multi-profile AWS config
+│   ├── module-aws-profile.nix # Multi-identity AWS CLI config
 │   ├── module-validation.nix # ARN validation
 │   ├── module-packages.nix   # Package installation
 │   ├── lib.nix               # Helper functions
