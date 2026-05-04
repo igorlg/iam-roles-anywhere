@@ -88,7 +88,7 @@ def state_with_role_and_host(state_with_role: State) -> State:
     state_with_role.hosts["web1"] = Host(
         stack_name="iam-ra-test-host-web1",
         hostname="web1",
-        role_name="admin",
+        role_names=("admin",),
         certificate_secret_arn=Arn(
             "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:cert"
         ),

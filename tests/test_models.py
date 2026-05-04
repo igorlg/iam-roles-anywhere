@@ -4,7 +4,18 @@ import json
 
 import pytest
 
-from iam_ra_cli.models import CA, Arn, CAMode, Host, Init, K8sCluster, K8sWorkload, Role, State
+from iam_ra_cli.models import (
+    CA,
+    Arn,
+    CAMode,
+    Host,
+    Init,
+    K8sCluster,
+    K8sWorkload,
+    NamespaceInfo,
+    Role,
+    State,
+)
 
 
 class TestArn:
@@ -150,13 +161,14 @@ class TestRole:
 
 
 class TestHost:
-    """Tests for Host dataclass."""
+    """Tests for Host dataclass (v3 - role_names tuple, explicit scope)."""
 
-    def test_host_creation(self) -> None:
+    def test_host_single_role(self) -> None:
         host = Host(
             stack_name="iam-ra-test-host-web1",
             hostname="web1",
-            role_name="admin",
+            role_names=("admin",),
+            scope="default",
             certificate_secret_arn=Arn(
                 "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:cert-AbCdEf"
             ),
@@ -165,7 +177,40 @@ class TestHost:
             ),
         )
         assert host.hostname == "web1"
-        assert host.role_name == "admin"
+        assert host.role_names == ("admin",)
+        assert host.scope == "default"
+
+    def test_host_multi_role(self) -> None:
+        """v3 allows multiple roles per host (scenario 2)."""
+        host = Host(
+            stack_name="iam-ra-test-host-mbp",
+            hostname="mbp",
+            role_names=("admin", "readonly", "deploy"),
+            scope="default",
+            certificate_secret_arn=Arn(
+                "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:cert"
+            ),
+            private_key_secret_arn=Arn(
+                "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:key"
+            ),
+        )
+        assert len(host.role_names) == 3
+        assert "admin" in host.role_names
+        assert "readonly" in host.role_names
+
+    def test_host_default_scope(self) -> None:
+        host = Host(
+            stack_name="test",
+            hostname="web1",
+            role_names=("admin",),
+            certificate_secret_arn=Arn(
+                "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:cert"
+            ),
+            private_key_secret_arn=Arn(
+                "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:key"
+            ),
+        )
+        assert host.scope == "default"
 
 
 class TestState:
@@ -256,7 +301,8 @@ class TestState:
                 "web1": Host(
                     stack_name="iam-ra-test-host-web1",
                     hostname="web1",
-                    role_name="admin",
+                    role_names=("admin",),
+                    scope="default",
                     certificate_secret_arn=Arn(
                         "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:cert"
                     ),
@@ -290,6 +336,8 @@ class TestState:
 
         assert "web1" in restored.hosts
         assert restored.hosts["web1"].hostname == "web1"
+        assert restored.hosts["web1"].role_names == ("admin",)
+        assert restored.hosts["web1"].scope == "default"
 
     def test_state_json_is_valid(self) -> None:
         state = State(namespace="test", region="us-east-1", version="1.0.0")
@@ -562,3 +610,291 @@ class TestK8sWorkloadV2:
         )
         assert workload.name == "my-app"
         assert workload.namespace == "cert-manager"
+
+
+# =============================================================================
+# v3 schema
+# =============================================================================
+
+
+class TestNamespaceInfo:
+    """Tests for NamespaceInfo dataclass (v3 new)."""
+
+    def test_namespace_info_creation(self) -> None:
+        info = NamespaceInfo(account_id="123456789012", region="ap-southeast-2")
+        assert info.account_id == "123456789012"
+        assert info.region == "ap-southeast-2"
+
+    def test_namespace_info_is_frozen(self) -> None:
+        info = NamespaceInfo(account_id="123456789012", region="ap-southeast-2")
+        with pytest.raises(AttributeError):
+            info.account_id = "999999999999"
+
+
+class TestCAAccountId:
+    """Tests for CA.account_id field (v3 new, optional)."""
+
+    def test_ca_without_account_id_defaults_none(self) -> None:
+        """account_id can be None - legacy CAs from v2 state."""
+        ca = CA(
+            stack_name="test",
+            mode=CAMode.SELF_SIGNED,
+            trust_anchor_arn=Arn(
+                "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta"
+            ),
+        )
+        assert ca.account_id is None
+
+    def test_ca_with_account_id(self) -> None:
+        ca = CA(
+            stack_name="test",
+            mode=CAMode.SELF_SIGNED,
+            trust_anchor_arn=Arn(
+                "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta"
+            ),
+            account_id="123456789012",
+        )
+        assert ca.account_id == "123456789012"
+
+    def test_ca_account_id_survives_json_roundtrip(self) -> None:
+        state = State(
+            namespace="test",
+            region="us-east-1",
+            version="3.0.0",
+            cas={
+                "default": CA(
+                    stack_name="test",
+                    mode=CAMode.SELF_SIGNED,
+                    trust_anchor_arn=Arn(
+                        "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta"
+                    ),
+                    account_id="123456789012",
+                ),
+            },
+        )
+        restored = State.from_json(state.to_json())
+        assert restored.cas["default"].account_id == "123456789012"
+
+
+class TestStateNamespaceInfo:
+    """Tests for State.namespace_info (v3 new)."""
+
+    def test_state_default_namespace_info_none(self) -> None:
+        state = State(namespace="test", region="us-east-1", version="3.0.0")
+        assert state.namespace_info is None
+
+    def test_state_with_namespace_info(self) -> None:
+        info = NamespaceInfo(account_id="123456789012", region="us-east-1")
+        state = State(
+            namespace="test",
+            region="us-east-1",
+            version="3.0.0",
+            namespace_info=info,
+        )
+        assert state.namespace_info == info
+        assert state.namespace_info.account_id == "123456789012"
+
+    def test_namespace_info_survives_json_roundtrip(self) -> None:
+        state = State(
+            namespace="test",
+            region="us-east-1",
+            version="3.0.0",
+            namespace_info=NamespaceInfo(account_id="999888777666", region="us-east-1"),
+        )
+        restored = State.from_json(state.to_json())
+        assert restored.namespace_info is not None
+        assert restored.namespace_info.account_id == "999888777666"
+
+
+class TestV2ToV3Migration:
+    """v2 state files must migrate cleanly to v3:
+
+    - Host.role_name (str) -> Host.role_names (tuple[str, ...])
+    - Host gets explicit scope (derived from its role's scope)
+    - CA.account_id backfilled from trust_anchor_arn.account
+    - NamespaceInfo backfilled from init.bucket_arn.account + region
+    """
+
+    def _v2_state_with_host(self) -> str:
+        """A realistic v2 state JSON (with role_name: str on Host)."""
+        return json.dumps(
+            {
+                "namespace": "default",
+                "region": "ap-southeast-2",
+                "version": "2.4.0",
+                "init": {
+                    "stack_name": "iam-ra-default-init",
+                    "bucket_arn": "arn:aws:s3:::iam-ra-default-bucket",
+                    "kms_key_arn": "arn:aws:kms:ap-southeast-2:718758479978:key/abc-123",
+                },
+                "cas": {
+                    "default": {
+                        "stack_name": "iam-ra-default-ca-default",
+                        "mode": "self-signed",
+                        "trust_anchor_arn": (
+                            "arn:aws:rolesanywhere:ap-southeast-2:"
+                            "718758479978:trust-anchor/ta-1"
+                        ),
+                    },
+                },
+                "roles": {
+                    "admin": {
+                        "stack_name": "iam-ra-default-role-admin",
+                        "role_arn": "arn:aws:iam::718758479978:role/admin",
+                        "profile_arn": (
+                            "arn:aws:rolesanywhere:ap-southeast-2:718758479978:profile/p-1"
+                        ),
+                        "policies": [],
+                        "scope": "default",
+                    },
+                },
+                "hosts": {
+                    "web1": {
+                        "stack_name": "iam-ra-default-host-web1",
+                        "hostname": "web1",
+                        "role_name": "admin",
+                        "certificate_secret_arn": (
+                            "arn:aws:secretsmanager:ap-southeast-2:"
+                            "718758479978:secret:iam-ra-cert"
+                        ),
+                        "private_key_secret_arn": (
+                            "arn:aws:secretsmanager:ap-southeast-2:"
+                            "718758479978:secret:iam-ra-key"
+                        ),
+                    },
+                },
+            }
+        )
+
+    def test_v2_host_role_name_migrates_to_role_names(self) -> None:
+        state = State.from_json(self._v2_state_with_host())
+        host = state.hosts["web1"]
+        assert host.role_names == ("admin",)
+
+    def test_v2_host_gets_scope_backfilled_from_role(self) -> None:
+        """v2 hosts had implicit scope (via their role). v3 stores it explicitly."""
+        state = State.from_json(self._v2_state_with_host())
+        host = state.hosts["web1"]
+        assert host.scope == "default"
+
+    def test_v2_ca_gets_account_id_from_trust_anchor_arn(self) -> None:
+        """v2 CAs had no account_id field. Derive it from the trust anchor ARN."""
+        state = State.from_json(self._v2_state_with_host())
+        assert state.cas["default"].account_id == "718758479978"
+
+    def test_v2_state_gets_namespace_info_backfilled(self) -> None:
+        """v2 had no NamespaceInfo. Backfill from init.bucket_arn.account + region."""
+        state = State.from_json(self._v2_state_with_host())
+        assert state.namespace_info is not None
+        assert state.namespace_info.account_id == "718758479978"
+        assert state.namespace_info.region == "ap-southeast-2"
+
+    def test_v2_state_without_init_has_no_namespace_info(self) -> None:
+        """If init is None, we can't derive account_id. Leave as None."""
+        v2_json = json.dumps(
+            {
+                "namespace": "fresh",
+                "region": "us-east-1",
+                "version": "2.0.0",
+                "init": None,
+                "cas": {},
+                "roles": {},
+                "hosts": {},
+            }
+        )
+        state = State.from_json(v2_json)
+        assert state.namespace_info is None
+
+    def test_v2_state_with_multi_scope_host_derives_per_host(self) -> None:
+        """Host whose role has scope 'cert-manager' should get scope='cert-manager'."""
+        v2_json = json.dumps(
+            {
+                "namespace": "default",
+                "region": "us-east-1",
+                "version": "2.0.0",
+                "init": None,
+                "cas": {},
+                "roles": {
+                    "cm-role": {
+                        "stack_name": "iam-ra-test-role-cm",
+                        "role_arn": "arn:aws:iam::123456789012:role/cm",
+                        "profile_arn": (
+                            "arn:aws:rolesanywhere:us-east-1:123456789012:profile/cm"
+                        ),
+                        "policies": [],
+                        "scope": "cert-manager",
+                    },
+                },
+                "hosts": {
+                    "cm-host": {
+                        "stack_name": "iam-ra-test-host-cm",
+                        "hostname": "cm-host",
+                        "role_name": "cm-role",
+                        "certificate_secret_arn": (
+                            "arn:aws:secretsmanager:us-east-1:123456789012:secret:cert"
+                        ),
+                        "private_key_secret_arn": (
+                            "arn:aws:secretsmanager:us-east-1:123456789012:secret:key"
+                        ),
+                    },
+                },
+            }
+        )
+        state = State.from_json(v2_json)
+        assert state.hosts["cm-host"].scope == "cert-manager"
+
+    def test_v1_state_still_migrates_forward(self) -> None:
+        """v1 (ca field) -> v2 (cas dict) -> v3 (Host.role_names etc.). Chained."""
+        v1_json = json.dumps(
+            {
+                "namespace": "default",
+                "region": "us-east-1",
+                "version": "1.0.0",
+                "init": {
+                    "stack_name": "init",
+                    "bucket_arn": "arn:aws:s3:::bucket",
+                    "kms_key_arn": "arn:aws:kms:us-east-1:123456789012:key/key",
+                },
+                "ca": {
+                    "stack_name": "ca",
+                    "mode": "self-signed",
+                    "trust_anchor_arn": (
+                        "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta"
+                    ),
+                },
+                "roles": {
+                    "admin": {
+                        "stack_name": "iam-ra-default-role-admin",
+                        "role_arn": "arn:aws:iam::123456789012:role/admin",
+                        "profile_arn": (
+                            "arn:aws:rolesanywhere:us-east-1:123456789012:profile/p"
+                        ),
+                        "policies": [],
+                    },
+                },
+                "hosts": {
+                    "h1": {
+                        "stack_name": "h1-stack",
+                        "hostname": "h1",
+                        "role_name": "admin",
+                        "certificate_secret_arn": (
+                            "arn:aws:secretsmanager:us-east-1:123456789012:secret:cert"
+                        ),
+                        "private_key_secret_arn": (
+                            "arn:aws:secretsmanager:us-east-1:123456789012:secret:key"
+                        ),
+                    },
+                },
+            }
+        )
+        state = State.from_json(v1_json)
+
+        # v1 -> v2 bits (pre-existing)
+        assert "default" in state.cas
+
+        # v2 -> v3 bits (new)
+        assert state.hosts["h1"].role_names == ("admin",)
+        assert state.hosts["h1"].scope == "default"
+        assert state.cas["default"].account_id == "123456789012"
+        assert state.namespace_info is not None
+        assert state.namespace_info.account_id == "123456789012"

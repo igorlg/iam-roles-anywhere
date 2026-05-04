@@ -53,7 +53,8 @@ def status(
         #                  "role_arn": str, "profile_arn": str,
         #                  "policies": [str],
         #                  "internal": { "stack_name": str } }, ... ],
-        #     "hosts": [ { "hostname": str, "role_name": str,
+        #     "hosts": [ { "hostname": str, "role_names": [str, ...],
+        #                  "scope": str,
         #                  "internal": { "stack_name": str,
         #                                "certificate_secret_arn": str,
         #                                "private_key_secret_arn": str } }, ...]
@@ -91,7 +92,8 @@ def status(
         hosts = [
             {
                 "hostname": hostname,
-                "role_name": host.role_name,
+                "role_names": list(host.role_names),
+                "scope": host.scope,
                 "internal": {
                     "stack_name": host.stack_name,
                     "certificate_secret_arn": str(host.certificate_secret_arn),
@@ -162,7 +164,9 @@ def status(
     if current.hosts:
         for hostname, host in sorted(current.hosts.items()):
             click.echo(f"  {hostname}")
-            echo_key_value("Role", host.role_name, indent=2)
+            roles_label = "Role" if len(host.role_names) == 1 else "Roles"
+            echo_key_value(roles_label, ", ".join(host.role_names), indent=2)
+            echo_key_value("Scope", host.scope, indent=2)
             echo_key_value("Stack", host.stack_name, indent=2)
     else:
         click.echo("  (none)")

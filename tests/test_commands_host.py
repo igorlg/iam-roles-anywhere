@@ -14,7 +14,7 @@ from iam_ra_cli.commands.host import (
 )
 from iam_ra_cli.models import Arn, Host
 from iam_ra_cli.operations.secrets import SecretsFileResult
-from iam_ra_cli.workflows.host import OnboardResult
+from iam_ra_cli.workflows.host import OnboardResult, RoleProfile
 
 # =============================================================================
 # Fixtures (module-level helpers, not pytest fixtures)
@@ -26,7 +26,8 @@ def _make_onboard_result(secrets_file: SecretsFileResult | None = None) -> Onboa
     host = Host(
         stack_name="iam-ra-default-host-myhost",
         hostname="myhost",
-        role_name="iamra-admin",
+        role_names=("iamra-admin",),
+        scope="default",
         certificate_secret_arn=Arn(
             "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:iam-ra/default/myhost/certificate-abc123"
         ),
@@ -42,11 +43,16 @@ def _make_onboard_result(secrets_file: SecretsFileResult | None = None) -> Onboa
         trust_anchor_arn=Arn(
             "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-1"
         ),
-        profile_arn=Arn(
-            "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/profile-1"
-        ),
-        role_arn=Arn(
-            "arn:aws:iam::123456789012:role/iam-ra-default-iamra-admin"
+        role_profiles=(
+            RoleProfile(
+                role_name="iamra-admin",
+                role_arn=Arn(
+                    "arn:aws:iam::123456789012:role/iam-ra-default-iamra-admin"
+                ),
+                profile_arn=Arn(
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/profile-1"
+                ),
+            ),
         ),
     )
 
@@ -126,8 +132,10 @@ class TestRenderNixSnippet:
         result = _make_onboard_result()
         lines = _render_nix_snippet(result, rel_sops_path=None)
         rendered = "\n".join(lines)
-        assert str(result.profile_arn) in rendered
-        assert str(result.role_arn) in rendered
+        # v3: result.role_profiles is a tuple of RoleProfile records
+        for rp in result.role_profiles:
+            assert str(rp.profile_arn) in rendered
+            assert str(rp.role_arn) in rendered
 
     def test_snippet_contains_region(self) -> None:
         result = _make_onboard_result()
@@ -140,7 +148,10 @@ class TestRenderNixSnippet:
         result = _make_onboard_result()
         lines = _render_nix_snippet(result, rel_sops_path=None)
         rendered = "\n".join(lines)
-        assert "profiles.iamra-admin" in rendered
+        # v3: multiple profiles rendered as `profiles = { <name> = {...}; };`
+        # rather than `profiles.<name> = {...};`. Check for the role name
+        # appearing as an attribute inside the profiles block.
+        assert "iamra-admin = {" in rendered
 
     def test_snippet_uses_real_sops_path_when_provided(self) -> None:
         result = _make_onboard_result()
@@ -218,8 +229,10 @@ class TestRenderHumanOutput:
         result = _make_onboard_result()
         out = self._render(result)
         assert str(result.trust_anchor_arn) in out
-        assert str(result.profile_arn) in out
-        assert str(result.role_arn) in out
+        # v3: each RoleProfile's ARNs should appear in the output
+        for rp in result.role_profiles:
+            assert str(rp.profile_arn) in out
+            assert str(rp.role_arn) in out
 
     def test_secrets_manager_arns_appear_after_identifiers(self) -> None:
         """Internal Secrets Manager ARNs should come AFTER the Nix identifiers,
@@ -295,10 +308,15 @@ class TestHostOnboardJsonSchema:
         assert data["hostname"] == "myhost"
         assert data["namespace"] == "default"
         assert data["region"] == "ap-southeast-2"
-        assert data["role_name"] == "iamra-admin"
+        # v3: role_names is a list at the top level (was scalar role_name)
+        assert data["role_names"] == ["iamra-admin"]
         assert "trust-anchor" in data["trust_anchor_arn"]
-        assert "profile" in data["profile_arn"]
-        assert "role" in data["role_arn"]
+        # v3: role_profiles is a list of {role_name, profile_arn, role_arn}
+        assert len(data["role_profiles"]) == 1
+        rp = data["role_profiles"][0]
+        assert rp["role_name"] == "iamra-admin"
+        assert "profile" in rp["profile_arn"]
+        assert "role" in rp["role_arn"]
 
     def test_internal_fields_nested(self) -> None:
         """Stack name and Secrets Manager ARNs live under 'internal'."""

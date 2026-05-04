@@ -55,6 +55,9 @@ def _render_nix_snippet(result: OnboardResult, rel_sops_path: Path | None) -> li
     If rel_sops_path is None (SOPS file outside a flake repo), the snippet
     uses a placeholder that the user must edit; otherwise the real Nix
     path literal (e.g. ./secrets/hosts/myhost/iam-ra.yaml) is used.
+
+    v3: multiple role_profiles render as multiple `profiles.<name> = { ... }`
+    entries sharing the same cert/trust anchor.
     """
     sops_nix_path = f"./{rel_sops_path}" if rel_sops_path else "./path/to/iam-ra.yaml"
     lines = [
@@ -79,16 +82,28 @@ def _render_nix_snippet(result: OnboardResult, rel_sops_path: Path | None) -> li
         "       };",
         f'       trustAnchorArn = "{result.trust_anchor_arn}";',
         f'       region = "{result.region}";',
-        f"       profiles.{result.host.role_name} = {{",
-        f'         profileArn = "{result.profile_arn}";',
-        f'         roleArn    = "{result.role_arn}";',
-        "       };",
-        "     };",
-        "",
-        "3. Deploy and verify:",
-        "",
-        f"     aws sts get-caller-identity --profile {result.host.role_name}",
+        "       profiles = {",
     ]
+    for rp in result.role_profiles:
+        lines.extend(
+            [
+                f"         {rp.role_name} = {{",
+                f'           profileArn = "{rp.profile_arn}";',
+                f'           roleArn    = "{rp.role_arn}";',
+                "         };",
+            ]
+        )
+    lines.extend(
+        [
+            "       };",
+            "     };",
+            "",
+            "3. Deploy and verify:",
+            "",
+        ]
+    )
+    for rp in result.role_profiles:
+        lines.append(f"     aws sts get-caller-identity --profile {rp.role_name}")
     return lines
 
 
@@ -96,8 +111,8 @@ def _render_human(result: OnboardResult) -> None:
     """Emit the human-readable onboard summary to stdout via click.echo.
 
     Layout:
-      1. Basic identifiers (hostname/namespace/region/role)
-      2. ARNs the user needs for Nix config (Trust Anchor, Profile, Role)
+      1. Basic identifiers (hostname/namespace/region/roles)
+      2. ARNs the user needs for Nix config (Trust Anchor + per-role profiles)
       3. Secrets file info (absolute + relative + SOPS keys)
       4. Next steps: Nix snippet + verification command
       5. Internal details (Secrets Manager ARNs) - de-emphasized at the end
@@ -106,13 +121,17 @@ def _render_human(result: OnboardResult) -> None:
     echo_key_value("Hostname", result.host.hostname, indent=1)
     echo_key_value("Namespace", result.namespace, indent=1)
     echo_key_value("Region", result.region, indent=1)
-    echo_key_value("Role", result.host.role_name, indent=1)
+    # Display the list of roles; singular "Role" label if just one, plural
+    # otherwise, to keep the existing phrasing for the scenario-1 case.
+    role_label = "Role" if len(result.host.role_names) == 1 else "Roles"
+    echo_key_value(role_label, ", ".join(result.host.role_names), indent=1)
 
     click.echo()
     click.secho("Identifiers for Nix config:", bold=True)
     echo_key_value("Trust Anchor", str(result.trust_anchor_arn), indent=1)
-    echo_key_value("Profile", str(result.profile_arn), indent=1)
-    echo_key_value("Role ARN", str(result.role_arn), indent=1)
+    for rp in result.role_profiles:
+        echo_key_value(f"Profile ({rp.role_name})", str(rp.profile_arn), indent=1)
+        echo_key_value(f"Role ARN ({rp.role_name})", str(rp.role_arn), indent=1)
 
     if result.secrets_file:
         absolute, _repo_root, relative = _sops_paths(result.secrets_file.path)
@@ -154,22 +173,24 @@ def _render_human(result: OnboardResult) -> None:
 def _build_json_payload(result: OnboardResult) -> dict[str, object]:
     """Build the JSON payload for `host onboard --json`.
 
-    Schema (v1):
+    Schema (v1 envelope, v3 content):
       {
         "hostname": str,
         "namespace": str,
         "region": str,
-        "role_name": str,
-        "trust_anchor_arn": str,       # ARN for programs.iamRolesAnywhere
-        "profile_arn": str,
-        "role_arn": str,
+        "role_names": [str, ...],
+        "trust_anchor_arn": str,
+        "role_profiles": [
+          { "role_name": str, "profile_arn": str, "role_arn": str },
+          ...
+        ],
         "secrets_file": {               # null when --no-sops
-          "path": str,                  # absolute path to SOPS file
-          "relative_path": str | null,  # relative to flake root (null if outside)
+          "path": str,
+          "relative_path": str | null,
           "encrypted": bool,
-          "keys": [str, ...]            # YAML keys inside the SOPS file
+          "keys": [str, ...]
         } | null,
-        "internal": {                   # internal AWS resource IDs, not for Nix
+        "internal": {
           "stack_name": str,
           "certificate_secret_arn": str,
           "private_key_secret_arn": str
@@ -191,10 +212,16 @@ def _build_json_payload(result: OnboardResult) -> dict[str, object]:
         "hostname": result.host.hostname,
         "namespace": result.namespace,
         "region": result.region,
-        "role_name": result.host.role_name,
+        "role_names": list(result.host.role_names),
         "trust_anchor_arn": str(result.trust_anchor_arn),
-        "profile_arn": str(result.profile_arn),
-        "role_arn": str(result.role_arn),
+        "role_profiles": [
+            {
+                "role_name": rp.role_name,
+                "profile_arn": str(rp.profile_arn),
+                "role_arn": str(rp.role_arn),
+            }
+            for rp in result.role_profiles
+        ],
         "secrets_file": secrets_file_payload,
         "internal": {
             "stack_name": result.host.stack_name,
@@ -220,9 +247,13 @@ def host() -> None:
 @click.option(
     "--role",
     "-R",
-    "role_name",
+    "role_flags",
     required=True,
-    help="Role name to associate with this host (must exist)",
+    multiple=True,
+    help=(
+        "Role name to associate with this host. Pass multiple times or "
+        "comma-separated to onboard with multiple roles under a single cert."
+    ),
 )
 @namespace_option
 @aws_options
@@ -251,7 +282,7 @@ def host() -> None:
 @json_option
 def host_onboard(
     hostname: str,
-    role_name: str,
+    role_flags: tuple[str, ...],
     namespace: str,
     region: str,
     profile: str | None,
@@ -268,16 +299,34 @@ def host_onboard(
 
     HOSTNAME is the identifier for this host (used in certificate CN).
 
+    A host can be onboarded with multiple roles as long as they all share
+    the same scope (same trust anchor). Pass --role multiple times or use
+    comma-separated values.
+
     \b
     Examples:
       iam-ra host onboard myhost --role admin
       iam-ra host onboard myhost --role readonly --validity-days 90
       iam-ra host onboard webserver --role app --no-sops
+      iam-ra host onboard mbp --role admin --role readonly --role deploy
+      iam-ra host onboard mbp --role admin,readonly,deploy
     """
+    # Expand comma-separated values inside each --role flag + dedupe while
+    # preserving order.
+    role_names: list[str] = []
+    for flag in role_flags:
+        for name in flag.split(","):
+            name = name.strip()
+            if name and name not in role_names:
+                role_names.append(name)
+
     if not as_json:
         click.echo(f"Onboarding host: {hostname}")
         echo_key_value("Namespace", namespace, indent=1)
-        echo_key_value("Role", role_name, indent=1)
+        if len(role_names) == 1:
+            echo_key_value("Role", role_names[0], indent=1)
+        else:
+            echo_key_value("Roles", ", ".join(role_names), indent=1)
         echo_key_value("Validity", f"{validity_days} days", indent=1)
         click.echo()
 
@@ -285,7 +334,7 @@ def host_onboard(
     config = OnboardConfig(
         namespace=namespace,
         hostname=hostname,
-        role_name=role_name,
+        role_names=tuple(role_names),
         validity_days=validity_days,
         create_sops=not no_sops,
         sops_output_path=Path(sops_output) if sops_output else None,
@@ -367,11 +416,11 @@ def host_list(
     hosts = handle_result(list_hosts(ctx, namespace), as_json=as_json)
 
     if as_json:
-        # Schema (v1):
+        # Schema (v1 envelope, v3 content):
         #   { "schema_version": "v1",
         #     "namespace": str,
         #     "items": [
-        #       { "hostname": str, "role_name": str,
+        #       { "hostname": str, "role_names": [str, ...], "scope": str,
         #         "internal": { "stack_name": str,
         #                       "certificate_secret_arn": str,
         #                       "private_key_secret_arn": str } },
@@ -381,7 +430,8 @@ def host_list(
         items = [
             {
                 "hostname": h.hostname,
-                "role_name": h.role_name,
+                "role_names": list(h.role_names),
+                "scope": h.scope,
                 "internal": {
                     "stack_name": h.stack_name,
                     "certificate_secret_arn": str(h.certificate_secret_arn),
@@ -403,6 +453,8 @@ def host_list(
     click.echo()
     for hostname, h in sorted(hosts.items()):
         click.echo(f"  {hostname}")
-        echo_key_value("Role", h.role_name, indent=2)
+        roles_label = "Role" if len(h.role_names) == 1 else "Roles"
+        echo_key_value(roles_label, ", ".join(h.role_names), indent=2)
+        echo_key_value("Scope", h.scope, indent=2)
         echo_key_value("Stack", h.stack_name, indent=2)
         click.echo()

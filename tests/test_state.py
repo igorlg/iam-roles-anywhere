@@ -9,7 +9,7 @@ from moto import mock_aws
 
 from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.result import Err, Ok
-from iam_ra_cli.models import CA, Arn, CAMode, Host, Init, Role, State
+from iam_ra_cli.models import CA, Arn, CAMode, Host, Init, NamespaceInfo, Role, State
 
 
 @pytest.fixture
@@ -61,6 +61,10 @@ def sample_state() -> State:
         namespace="test",
         region="ap-southeast-2",
         version="0.1.0",
+        namespace_info=NamespaceInfo(
+            account_id="123456789012",
+            region="ap-southeast-2",
+        ),
         init=Init(
             stack_name="iam-ra-test-init",
             bucket_arn=Arn("arn:aws:s3:::test-bucket"),
@@ -73,6 +77,7 @@ def sample_state() -> State:
                 trust_anchor_arn=Arn(
                     "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/test-anchor"
                 ),
+                account_id="123456789012",
             ),
         },
         roles={
@@ -89,7 +94,8 @@ def sample_state() -> State:
             "web1": Host(
                 stack_name="iam-ra-test-host-web1",
                 hostname="web1",
-                role_name="admin",
+                role_names=("admin",),
+                scope="default",
                 certificate_secret_arn=Arn(
                     "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:test-cert"
                 ),
@@ -237,3 +243,337 @@ class TestStateCache:
 
         # Verify cache is gone
         assert not cache_path.exists()
+
+
+# =============================================================================
+# Loading old-version state files
+#
+# Users who upgrade iam-ra will have existing state files on S3 / in local
+# cache from previous versions. load() must transparently migrate them so no
+# manual `iam-ra migrate` is needed for the simple read path.
+#
+# These fixtures are raw JSON strings (the on-disk shape of each version)
+# rather than constructed Python objects. That lets us test exactly what
+# comes out of S3 for a real upgrader.
+# =============================================================================
+
+
+@pytest.fixture
+def v1_state_json() -> str:
+    """Raw v1 state JSON - had a singular `ca` field (not `cas` dict), Host
+    had `role_name: str`, no Host.scope, no CA.account_id, no namespace_info.
+
+    Represents what an old iam-ra 1.x install would have in S3.
+    """
+    return json.dumps(
+        {
+            "namespace": "legacy-v1",
+            "region": "ap-southeast-2",
+            "version": "1.0.0",
+            "init": {
+                "stack_name": "iam-ra-legacy-v1-init",
+                "bucket_arn": "arn:aws:s3:::legacy-v1-bucket",
+                "kms_key_arn": "arn:aws:kms:ap-southeast-2:111122223333:key/v1-key",
+            },
+            "ca": {
+                "stack_name": "iam-ra-legacy-v1-rootca",
+                "mode": "self-signed",
+                "trust_anchor_arn": (
+                    "arn:aws:rolesanywhere:ap-southeast-2:111122223333:trust-anchor/v1-ta"
+                ),
+            },
+            "roles": {
+                "admin": {
+                    "stack_name": "iam-ra-legacy-v1-role-admin",
+                    "role_arn": "arn:aws:iam::111122223333:role/admin",
+                    "profile_arn": (
+                        "arn:aws:rolesanywhere:ap-southeast-2:111122223333:profile/admin"
+                    ),
+                    "policies": [],
+                },
+            },
+            "hosts": {
+                "legacy-host": {
+                    "stack_name": "iam-ra-legacy-v1-host-legacy-host",
+                    "hostname": "legacy-host",
+                    "role_name": "admin",
+                    "certificate_secret_arn": (
+                        "arn:aws:secretsmanager:ap-southeast-2:111122223333:secret:cert-v1"
+                    ),
+                    "private_key_secret_arn": (
+                        "arn:aws:secretsmanager:ap-southeast-2:111122223333:secret:key-v1"
+                    ),
+                },
+            },
+        }
+    )
+
+
+@pytest.fixture
+def v2_state_json() -> str:
+    """Raw v2 state JSON - has per-scope `cas` dict + Role.scope, but still
+    has Host.role_name (str), no Host.scope, no CA.account_id, no
+    namespace_info.
+
+    Represents what an iam-ra 2.x install (before this PR) would have in S3.
+
+    Note: bucket_arn uses `test-bucket` to match the mocked S3 bucket in
+    aws_clients, so save() round-trips work in tests.
+    """
+    return json.dumps(
+        {
+            "namespace": "legacy-v2",
+            "region": "ap-southeast-2",
+            "version": "2.4.2",
+            "init": {
+                "stack_name": "iam-ra-legacy-v2-init",
+                "bucket_arn": "arn:aws:s3:::test-bucket",
+                "kms_key_arn": "arn:aws:kms:ap-southeast-2:444455556666:key/v2-key",
+            },
+            "cas": {
+                "default": {
+                    "stack_name": "iam-ra-legacy-v2-ca-default",
+                    "mode": "self-signed",
+                    "trust_anchor_arn": (
+                        "arn:aws:rolesanywhere:ap-southeast-2:444455556666:trust-anchor/v2-ta"
+                    ),
+                },
+                "cert-manager": {
+                    "stack_name": "iam-ra-legacy-v2-ca-cert-manager",
+                    "mode": "self-signed",
+                    "trust_anchor_arn": (
+                        "arn:aws:rolesanywhere:ap-southeast-2:444455556666:trust-anchor/v2-ta-cm"
+                    ),
+                },
+            },
+            "roles": {
+                "admin": {
+                    "stack_name": "iam-ra-legacy-v2-role-admin",
+                    "role_arn": "arn:aws:iam::444455556666:role/admin",
+                    "profile_arn": (
+                        "arn:aws:rolesanywhere:ap-southeast-2:444455556666:profile/admin"
+                    ),
+                    "policies": [],
+                    "scope": "default",
+                },
+                "cm-role": {
+                    "stack_name": "iam-ra-legacy-v2-role-cm-role",
+                    "role_arn": "arn:aws:iam::444455556666:role/cm-role",
+                    "profile_arn": (
+                        "arn:aws:rolesanywhere:ap-southeast-2:444455556666:profile/cm-role"
+                    ),
+                    "policies": [],
+                    "scope": "cert-manager",
+                },
+            },
+            "hosts": {
+                "default-host": {
+                    "stack_name": "iam-ra-legacy-v2-host-default-host",
+                    "hostname": "default-host",
+                    "role_name": "admin",
+                    "certificate_secret_arn": (
+                        "arn:aws:secretsmanager:ap-southeast-2:444455556666:secret:cert-default"
+                    ),
+                    "private_key_secret_arn": (
+                        "arn:aws:secretsmanager:ap-southeast-2:444455556666:secret:key-default"
+                    ),
+                },
+                "cm-host": {
+                    "stack_name": "iam-ra-legacy-v2-host-cm-host",
+                    "hostname": "cm-host",
+                    "role_name": "cm-role",
+                    "certificate_secret_arn": (
+                        "arn:aws:secretsmanager:ap-southeast-2:444455556666:secret:cert-cm"
+                    ),
+                    "private_key_secret_arn": (
+                        "arn:aws:secretsmanager:ap-southeast-2:444455556666:secret:key-cm"
+                    ),
+                },
+            },
+        }
+    )
+
+
+def _put_raw_state(s3, ssm, namespace: str, raw_json: str) -> None:
+    """Place a pre-existing state file in S3 and point SSM at it."""
+    bucket = "test-bucket"
+    key = f"{namespace}/state.json"
+    s3.put_object(Bucket=bucket, Key=key, Body=raw_json.encode("utf-8"))
+    ssm.put_parameter(
+        Name=f"/iam-ra/{namespace}/state-location",
+        Value=f"s3://{bucket}/{key}",
+        Type="String",
+    )
+
+
+class TestLoadV1State:
+    """load() must transparently migrate v1 state to current shape."""
+
+    def test_load_v1_returns_ok(self, aws_clients, v1_state_json: str) -> None:
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v1", v1_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v1", skip_cache=True)
+
+        assert isinstance(result, Ok)
+        assert result.value is not None
+
+    def test_load_v1_migrates_ca_to_cas(self, aws_clients, v1_state_json: str) -> None:
+        """v1 `ca` singular -> v2+ `cas` dict keyed by scope."""
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v1", v1_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v1", skip_cache=True)
+
+        assert isinstance(result, Ok) and result.value is not None
+        assert "default" in result.value.cas
+        assert result.value.cas["default"].stack_name == "iam-ra-legacy-v1-rootca"
+
+    def test_load_v1_migrates_host_role_name(
+        self, aws_clients, v1_state_json: str
+    ) -> None:
+        """v1 Host had role_name (str); v3 has role_names (tuple)."""
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v1", v1_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v1", skip_cache=True)
+
+        assert isinstance(result, Ok) and result.value is not None
+        host = result.value.hosts["legacy-host"]
+        assert host.role_names == ("admin",)
+        assert host.scope == "default"
+
+    def test_load_v1_backfills_namespace_info(
+        self, aws_clients, v1_state_json: str
+    ) -> None:
+        """NamespaceInfo should be derived from init.kms_key_arn.account."""
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v1", v1_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v1", skip_cache=True)
+
+        assert isinstance(result, Ok) and result.value is not None
+        assert result.value.namespace_info is not None
+        assert result.value.namespace_info.account_id == "111122223333"
+
+    def test_load_v1_backfills_ca_account_id(
+        self, aws_clients, v1_state_json: str
+    ) -> None:
+        """CA.account_id should be derived from trust_anchor_arn.account."""
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v1", v1_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v1", skip_cache=True)
+
+        assert isinstance(result, Ok) and result.value is not None
+        assert result.value.cas["default"].account_id == "111122223333"
+
+
+class TestLoadV2State:
+    """load() must transparently migrate v2 state to current shape.
+
+    This is the main real-world upgrade path - v2.x is the immediate
+    predecessor.
+    """
+
+    def test_load_v2_returns_ok(self, aws_clients, v2_state_json: str) -> None:
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v2", v2_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v2", skip_cache=True)
+
+        assert isinstance(result, Ok)
+        assert result.value is not None
+
+    def test_load_v2_preserves_multi_scope_cas(
+        self, aws_clients, v2_state_json: str
+    ) -> None:
+        """v2 already had per-scope cas; verify it comes through intact."""
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v2", v2_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v2", skip_cache=True)
+
+        assert isinstance(result, Ok) and result.value is not None
+        assert set(result.value.cas.keys()) == {"default", "cert-manager"}
+
+    def test_load_v2_host_scope_derives_from_role(
+        self, aws_clients, v2_state_json: str
+    ) -> None:
+        """Host.scope was implicit in v2 (via role.scope). v3 materialises it."""
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v2", v2_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v2", skip_cache=True)
+
+        assert isinstance(result, Ok) and result.value is not None
+        assert result.value.hosts["default-host"].scope == "default"
+        assert result.value.hosts["cm-host"].scope == "cert-manager"
+
+    def test_load_v2_backfills_per_scope_ca_account_id(
+        self, aws_clients, v2_state_json: str
+    ) -> None:
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v2", v2_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v2", skip_cache=True)
+
+        assert isinstance(result, Ok) and result.value is not None
+        # Both scopes' CAs are in the same AWS account; both should get the
+        # account_id backfilled from their (different) trust anchor ARNs.
+        assert result.value.cas["default"].account_id == "444455556666"
+        assert result.value.cas["cert-manager"].account_id == "444455556666"
+
+    def test_load_v2_backfills_namespace_info(
+        self, aws_clients, v2_state_json: str
+    ) -> None:
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v2", v2_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v2", skip_cache=True)
+
+        assert isinstance(result, Ok) and result.value is not None
+        assert result.value.namespace_info is not None
+        assert result.value.namespace_info.account_id == "444455556666"
+        assert result.value.namespace_info.region == "ap-southeast-2"
+
+    def test_load_v2_host_role_names_tuple(
+        self, aws_clients, v2_state_json: str
+    ) -> None:
+        """v2 Host.role_name (str) becomes v3 Host.role_names (tuple)."""
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v2", v2_state_json)
+
+        result = state_module.load(ssm, s3, "legacy-v2", skip_cache=True)
+
+        assert isinstance(result, Ok) and result.value is not None
+        assert result.value.hosts["default-host"].role_names == ("admin",)
+        assert result.value.hosts["cm-host"].role_names == ("cm-role",)
+
+    def test_load_v2_then_save_writes_v3_shape(
+        self, aws_clients, v2_state_json: str
+    ) -> None:
+        """After load-from-v2 + save, S3 should now hold a v3-shaped state
+        (role_names tuple, explicit scope, account_id, namespace_info).
+        Confirms migration is persisted back to S3 rather than being a
+        read-time-only transform."""
+        ssm, s3 = aws_clients
+        _put_raw_state(s3, ssm, "legacy-v2", v2_state_json)
+
+        loaded = state_module.load(ssm, s3, "legacy-v2", skip_cache=True)
+        assert isinstance(loaded, Ok) and loaded.value is not None
+
+        save_result = state_module.save(ssm, s3, loaded.value)
+        assert isinstance(save_result, Ok)
+
+        # Read the raw JSON from S3 and verify v3 fields are present
+        obj = s3.get_object(Bucket="test-bucket", Key="legacy-v2/state.json")
+        raw = json.loads(obj["Body"].read().decode("utf-8"))
+
+        assert raw["namespace_info"]["account_id"] == "444455556666"
+        assert raw["cas"]["default"]["account_id"] == "444455556666"
+        default_host = raw["hosts"]["default-host"]
+        assert default_host["role_names"] == ["admin"]
+        assert default_host["scope"] == "default"
+        # Old fields should no longer be present after migration + resave
+        assert "role_name" not in default_host
