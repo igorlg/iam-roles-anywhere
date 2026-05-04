@@ -15,6 +15,7 @@ import click
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     CAKeyNotFoundError,
+    CannotRemoveLastRoleError,
     CAScopeAlreadyExistsError,
     CAScopeNotFoundError,
     HostAlreadyExistsError,
@@ -34,6 +35,7 @@ from iam_ra_cli.lib.errors import (
     RoleAlreadyExistsError,
     RoleInUseError,
     RoleNotFoundError,
+    RoleScopeMismatchError,
     SecretsFileExistsError,
     SecretsManagerReadError,
     SOPSEncryptError,
@@ -169,6 +171,25 @@ def _format_error(error: Any) -> str:
             hosts_str = ", ".join(hosts)
             return (
                 f"Role '{role_name}' is in use by hosts: {hosts_str}. Use --force to delete anyway."
+            )
+
+        case RoleScopeMismatchError(
+            namespace, hostname, host_scope, role_name, role_scope
+        ):
+            return (
+                f"Role '{role_name}' is in scope '{role_scope}' but host "
+                f"'{hostname}' was onboarded under scope '{host_scope}'. "
+                f"A single cert can only authenticate against one trust anchor; "
+                f"cross-scope roles require a separate identity (see the "
+                f"multi-identity documentation)."
+            )
+
+        case CannotRemoveLastRoleError(namespace, hostname, role_name):
+            return (
+                f"Cannot remove role '{role_name}' - it's the only role "
+                f"attached to host '{hostname}'. A host with no roles is "
+                f"unusable; use 'iam-ra host offboard {hostname}' to remove "
+                f"the host entirely."
             )
 
         case HostNotFoundError(namespace, hostname):

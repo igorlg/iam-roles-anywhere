@@ -25,6 +25,14 @@ from iam_ra_cli.lib.errors import (
     StateSaveError,
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
+from iam_ra_cli.lib.sops import (
+    SOPS_SCHEMA_VERSION,
+    create_secrets_yaml,
+    decrypt_file,
+    get_secrets_path,
+    parse_secrets_yaml,
+    write_and_encrypt,
+)
 from iam_ra_cli.lib.storage.s3 import delete_object, object_exists, read_object, write_object
 from iam_ra_cli.models import CA, Arn
 from iam_ra_cli.operations.ca import (
@@ -61,6 +69,12 @@ class MigrateResult:
     local_key_migrated: bool = False
     ca_stack_migrated: bool = False
     roles_updated: list[str] = field(default_factory=list)
+    # v2 -> v3 SOPS schema: list of hostnames whose on-disk SOPS file was
+    # upgraded from v1 YAML (flat profile_arn/role_arn) to v2 YAML
+    # (nested profiles map + schema_version marker). Hosts whose SOPS
+    # files were already v2, or whose files weren't found on this
+    # machine, don't appear here.
+    sops_files_migrated: list[str] = field(default_factory=list)
 
 
 # =============================================================================
@@ -76,6 +90,55 @@ def _old_ca_cert_s3_key(namespace: str) -> str:
 def _old_ca_key_local_path(namespace: str):
     """v1 local path for CA private key."""
     return paths.data_dir() / namespace / "ca-private-key.pem"
+
+
+def _migrate_host_sops_file(hostname: str) -> bool:
+    """Migrate a single host's SOPS file from v1 YAML to v2 YAML.
+
+    Returns True if the file was rewritten, False if it was skipped
+    (already v2 or missing). Errors during decrypt/parse/encrypt are
+    logged and swallowed - a SOPS-related failure should not abort
+    the overall migration.
+    """
+    try:
+        sops_path = get_secrets_path(hostname)
+    except RuntimeError:
+        # Can't locate flake root -> can't locate SOPS files. Skip.
+        return False
+
+    if not sops_path.exists():
+        # File not on this machine (e.g. user migrating from a different
+        # workstation than where they originally onboarded).
+        return False
+
+    try:
+        plaintext = decrypt_file(sops_path)
+    except Exception:
+        # Decryption failure - might be an encrypted file we can't read,
+        # or sops CLI not on PATH. Skip rather than fail the whole migrate.
+        return False
+
+    # Short-circuit: already v2, nothing to do.
+    if f"schema_version: {SOPS_SCHEMA_VERSION}" in plaintext:
+        return False
+
+    try:
+        secrets = parse_secrets_yaml(plaintext)
+    except ValueError:
+        # Malformed YAML - can't migrate. Skip.
+        return False
+
+    # `parse_secrets_yaml` already upgrades v1 to the v2 in-memory shape
+    # (derives account_id, lifts scalar profile_arn/role_arn into profiles
+    # map). `create_secrets_yaml` always writes v2.
+    new_yaml = create_secrets_yaml(hostname=hostname, secrets=secrets)
+
+    try:
+        write_and_encrypt(new_yaml, sops_path)
+    except RuntimeError:
+        return False
+
+    return True
 
 
 def update_role_stack(
@@ -298,11 +361,22 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
         case Ok(_):
             pass
 
+    # 8. SOPS schema migration (v2 YAML shape -> v3 YAML shape, written
+    #    by lib/sops.py as "schema_version: v2" - the SOPS schema version
+    #    lags the state schema version). Idempotent: skips v2-shaped files
+    #    and missing files. Errors during SOPS I/O are swallowed per-host
+    #    rather than aborting the whole migrate.
+    sops_files_migrated: list[str] = []
+    for hostname in state.hosts:
+        if _migrate_host_sops_file(hostname):
+            sops_files_migrated.append(hostname)
+
     return Ok(
         MigrateResult(
             s3_migrated=s3_migrated,
             local_key_migrated=local_key_migrated,
             ca_stack_migrated=ca_stack_migrated,
             roles_updated=roles_updated,
+            sops_files_migrated=sops_files_migrated,
         )
     )

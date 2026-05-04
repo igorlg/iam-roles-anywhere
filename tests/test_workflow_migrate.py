@@ -975,3 +975,259 @@ class TestMigrateErrors:
 
             assert isinstance(result, Err)
             assert isinstance(result.error, NotInitializedError)
+
+
+# =============================================================================
+# Tests: SOPS file migration (v1 YAML shape -> v2 YAML shape)
+#
+# SOPS files are on disk (not in AWS), so these tests patch the decrypt /
+# encrypt calls and assert on the YAML content passed to write_and_encrypt.
+# =============================================================================
+
+
+_V1_SOPS_YAML = """\
+# IAM Roles Anywhere secrets for web1
+certificate: |
+  -----BEGIN CERTIFICATE-----
+  cert-pem-body
+  -----END CERTIFICATE-----
+private_key: |
+  -----BEGIN EC PRIVATE KEY-----
+  key-pem-body
+  -----END EC PRIVATE KEY-----
+trust_anchor_arn: arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta
+profile_arn: arn:aws:rolesanywhere:us-east-1:123456789012:profile/admin-profile
+role_arn: arn:aws:iam::123456789012:role/admin
+region: us-east-1
+"""
+
+
+_V2_SOPS_YAML = """\
+schema_version: v2
+certificate: |
+  -----BEGIN CERTIFICATE-----
+  cert-pem-body
+  -----END CERTIFICATE-----
+private_key: |
+  -----BEGIN EC PRIVATE KEY-----
+  key-pem-body
+  -----END EC PRIVATE KEY-----
+trust_anchor_arn: arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta
+account_id: "123456789012"
+region: us-east-1
+profiles:
+  admin:
+    profile_arn: arn:aws:rolesanywhere:us-east-1:123456789012:profile/admin-profile
+    role_arn: arn:aws:iam::123456789012:role/admin
+"""
+
+
+class TestMigrateSopsFiles:
+    """migrate must upgrade host SOPS files from v1 YAML to v2 YAML.
+
+    v1 files have scalar profile_arn/role_arn and no schema_version marker.
+    v2 files have a nested `profiles` map + schema_version. The parser in
+    lib/sops.py handles either on read; the migration rewrites to v2 on
+    disk so the Nix module can consume the current shape without the
+    parser fallback.
+    """
+
+    def _setup_v1_with_host(self, ctx: AwsContext) -> None:
+        """Set up v1 state that also has a host record (base fixture has
+        empty hosts dict)."""
+        bucket = "test-bucket"
+        namespace = "test"
+        state = {
+            "namespace": namespace,
+            "region": "ap-southeast-2",
+            "version": "1.0.0",
+            "init": {
+                "stack_name": f"iam-ra-{namespace}-init",
+                "bucket_arn": "arn:aws:s3:::test-bucket",
+                "kms_key_arn": (
+                    "arn:aws:kms:ap-southeast-2:123456789012:key/test-key"
+                ),
+            },
+            "ca": {
+                "stack_name": f"iam-ra-{namespace}-rootca",
+                "mode": "self-signed",
+                "trust_anchor_arn": (
+                    "arn:aws:rolesanywhere:ap-southeast-2:123456789012:"
+                    "trust-anchor/ta-v1"
+                ),
+                "pca_arn": None,
+            },
+            "roles": {
+                "admin": {
+                    "stack_name": f"iam-ra-{namespace}-role-admin",
+                    "role_arn": "arn:aws:iam::123456789012:role/admin",
+                    "profile_arn": (
+                        "arn:aws:rolesanywhere:ap-southeast-2:"
+                        "123456789012:profile/admin-profile"
+                    ),
+                    "policies": [],
+                },
+            },
+            "hosts": {
+                "host1": {
+                    "stack_name": f"iam-ra-{namespace}-host-host1",
+                    "hostname": "host1",
+                    "role_name": "admin",
+                    "certificate_secret_arn": (
+                        "arn:aws:secretsmanager:ap-southeast-2:"
+                        "123456789012:secret:iam-ra-cert"
+                    ),
+                    "private_key_secret_arn": (
+                        "arn:aws:secretsmanager:ap-southeast-2:"
+                        "123456789012:secret:iam-ra-key"
+                    ),
+                },
+            },
+            "k8s_clusters": {},
+            "k8s_workloads": {},
+        }
+
+        ctx.s3.create_bucket(
+            Bucket=bucket,
+            CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"},
+        )
+        ctx.s3.put_object(
+            Bucket=bucket,
+            Key=f"{namespace}/state.json",
+            Body=json.dumps(state).encode(),
+        )
+        ctx.s3.put_object(
+            Bucket=bucket,
+            Key=f"{namespace}/ca/certificate.pem",
+            Body=SAMPLE_CA_CERT.encode(),
+        )
+        ctx.ssm.put_parameter(
+            Name=f"/iam-ra/{namespace}/state-location",
+            Value=f"s3://{bucket}/{namespace}/state.json",
+            Type="String",
+        )
+
+    def test_v1_sops_file_is_rewritten_to_v2(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        captured: dict = {}
+
+        def capture(content: str, path, *a, **k) -> None:
+            captured["content"] = content
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            self._setup_v1_with_host(ctx)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.decrypt_file",
+                    return_value=_V1_SOPS_YAML,
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.write_and_encrypt",
+                    side_effect=capture,
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.get_secrets_path",
+                    return_value=Path("/fake/secrets/hosts/host1/iam-ra.yaml"),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(
+                        "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-v2"
+                    ),
+                ),
+                patch("pathlib.Path.exists", return_value=True),
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+            assert "host1" in result.value.sops_files_migrated
+            # The rewritten content is v2 shape
+            assert "schema_version: v2" in captured["content"]
+            assert "profiles:" in captured["content"]
+
+    def test_v2_sops_file_is_skipped(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """Running migrate on already-v2 SOPS files is a no-op for that file."""
+
+        def should_not_be_called(*a, **k) -> None:
+            raise AssertionError("write_and_encrypt should not be called for v2 files")
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            self._setup_v1_with_host(ctx)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.decrypt_file",
+                    return_value=_V2_SOPS_YAML,
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.write_and_encrypt",
+                    side_effect=should_not_be_called,
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.get_secrets_path",
+                    return_value=Path("/fake/secrets/hosts/host1/iam-ra.yaml"),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(
+                        "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-v2"
+                    ),
+                ),
+                patch("pathlib.Path.exists", return_value=True),
+            ):
+                result = migrate(ctx, "test")
+
+            assert isinstance(result, Ok)
+            # Nothing to migrate
+            assert "host1" not in result.value.sops_files_migrated
+
+    def test_missing_sops_file_is_skipped_gracefully(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        """If the host's SOPS file doesn't exist on this machine (e.g. the
+        user is running migrate from a different workstation), skip with
+        a warning - don't fail the whole migrate."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            self._setup_v1_with_host(ctx)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.get_secrets_path",
+                    return_value=Path("/fake/missing/iam-ra.yaml"),
+                ),
+                patch("pathlib.Path.exists", return_value=False),
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(
+                        "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-v2"
+                    ),
+                ),
+            ):
+                result = migrate(ctx, "test")
+
+            # Whole migrate succeeds even though SOPS was missing
+            assert isinstance(result, Ok)
+            # Not migrated (absent)
+            assert "host1" not in result.value.sops_files_migrated
