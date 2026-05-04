@@ -143,6 +143,23 @@ in
       Named profiles for IAM Roles Anywhere authentication.
       Each profile can assume a different IAM role using the same host certificate.
       The attribute name is used as the AWS CLI profile name by default.
+
+      All profiles share the certificate, private key, and trust anchor
+      above - they must therefore all belong to the same scope (same trust
+      anchor, same AWS account). For cross-scope / cross-account identities
+      (scenario 3 in the multi-identity plan), multiple hosts with separate
+      certs are required.
+
+      Management via the CLI:
+          iam-ra host onboard <host> --role X --role Y    # multi-role onboard
+          iam-ra host add-role <host> <role>              # attach a role
+          iam-ra host remove-role <host> <role>           # detach a role
+          iam-ra host rotate-cert <host>                  # renew cert, keep roles
+
+      The CLI writes the profile ARN map into the v2 SOPS file at
+      secrets/hosts/<host>/iam-ra.yaml (nested `profiles` key). The ARNs
+      are not secrets and can be pasted into Nix directly from
+      `iam-ra host onboard --json`.
     '';
     example = lib.literalExpression ''
       {
