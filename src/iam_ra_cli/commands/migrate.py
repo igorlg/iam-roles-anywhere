@@ -29,18 +29,21 @@ def migrate(
 
     \b
     What it does:
-      1. Converts state JSON from v1 to v2 format
+      1. Converts state JSON from v1 to v2 format (scoped CAs)
       2. Moves S3 CA cert to scoped path ({ns}/scopes/default/ca/)
       3. Moves local CA key to scoped path
       4. Updates role CFN stacks with TrustAnchorArn parameter
-      5. Re-saves state in v2 format
+      5. Re-saves state (auto-migrated to the current schema)
+      6. Upgrades host SOPS files from v1 YAML to v2 YAML (nested
+         profiles map, account_id, schema_version marker). Safely
+         skips files that are already v2 or missing from this machine.
 
     \b
     Examples:
       iam-ra migrate
       iam-ra migrate --namespace prod
     """
-    click.echo(f"Migrating namespace '{namespace}' from v1 to v2...")
+    click.echo(f"Migrating namespace '{namespace}'...")
     click.echo()
 
     ctx = AwsContext(region=region, profile=profile)
@@ -66,6 +69,15 @@ def migrate(
     else:
         echo_key_value("Roles updated", "none", indent=1)
 
+    if result.sops_files_migrated:
+        echo_key_value(
+            "SOPS files migrated",
+            ", ".join(result.sops_files_migrated),
+            indent=1,
+        )
+    else:
+        echo_key_value("SOPS files migrated", "none (already v2 or absent)", indent=1)
+
     click.echo()
-    click.echo("State is now in v2 format with scoped CAs.")
-    click.echo("You can now use 'iam-ra ca setup --scope <name>' to add per-namespace CAs.")
+    click.echo("State is now in the current format with scoped CAs.")
+    click.echo("You can use 'iam-ra ca setup --scope <name>' to add per-namespace CAs.")
