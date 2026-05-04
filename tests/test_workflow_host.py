@@ -236,7 +236,7 @@ class TestOnboardScopeDerivation:
                 config = OnboardConfig(
                     namespace="test",
                     hostname="myhost",
-                    role_name="admin",
+                    role_names=("admin",),
                     validity_days=365,
                     create_sops=True,
                 )
@@ -272,7 +272,7 @@ class TestOnboardScopeDerivation:
                 config = OnboardConfig(
                     namespace="test",
                     hostname="myhost",
-                    role_name="cert-manager",
+                    role_names=("cert-manager",),
                     validity_days=365,
                     create_sops=True,
                 )
@@ -293,7 +293,7 @@ class TestOnboardScopeDerivation:
             config = OnboardConfig(
                 namespace="test",
                 hostname="myhost",
-                role_name="longhorn-backup",
+                role_names=("longhorn-backup",),
                 validity_days=365,
             )
             result = onboard(ctx, config)
@@ -313,7 +313,7 @@ class TestOnboardScopeDerivation:
             config = OnboardConfig(
                 namespace="test",
                 hostname="myhost",
-                role_name="nonexistent",
+                role_names=("nonexistent",),
                 validity_days=365,
             )
             result = onboard(ctx, config)
@@ -360,7 +360,7 @@ class TestOnboardOperationsReceiveScope:
                 config = OnboardConfig(
                     namespace="test",
                     hostname="myhost",
-                    role_name="cert-manager",
+                    role_names=("cert-manager",),
                     validity_days=90,
                     create_sops=True,
                 )
@@ -399,7 +399,7 @@ class TestOnboardOperationsReceiveScope:
                 config = OnboardConfig(
                     namespace="test",
                     hostname="myhost",
-                    role_name="admin",
+                    role_names=("admin",),
                     validity_days=365,
                     create_sops=True,
                 )
@@ -420,7 +420,7 @@ class TestOnboardErrorTypeUnion:
             config = OnboardConfig(
                 namespace="nonexistent",
                 hostname="myhost",
-                role_name="admin",
+                role_names=("admin",),
                 validity_days=365,
             )
             result = onboard(ctx, config)
@@ -458,7 +458,7 @@ class TestOnboardResultFields:
                 config = OnboardConfig(
                     namespace="test",
                     hostname="myhost",
-                    role_name="admin",
+                    role_names=("admin",),
                 )
                 result = onboard(ctx, config)
 
@@ -486,15 +486,19 @@ class TestOnboardResultFields:
                 config = OnboardConfig(
                     namespace="test",
                     hostname="myhost",
-                    role_name="admin",
+                    role_names=("admin",),
                 )
                 result = onboard(ctx, config)
 
             assert isinstance(result, Ok)
-            assert str(result.value.profile_arn) == (
+            # v3: role_profiles replaces scalar profile_arn / role_arn
+            assert len(result.value.role_profiles) == 1
+            rp = result.value.role_profiles[0]
+            assert rp.role_name == "admin"
+            assert str(rp.profile_arn) == (
                 "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin-profile"
             )
-            assert str(result.value.role_arn) == "arn:aws:iam::123456789012:role/admin"
+            assert str(rp.role_arn) == "arn:aws:iam::123456789012:role/admin"
 
     def test_result_has_region_and_namespace(
         self, aws_credentials, temp_xdg_dirs, state_default_scope: State
@@ -517,7 +521,7 @@ class TestOnboardResultFields:
                 config = OnboardConfig(
                     namespace="test",
                     hostname="myhost",
-                    role_name="admin",
+                    role_names=("admin",),
                 )
                 result = onboard(ctx, config)
 
@@ -546,7 +550,7 @@ class TestOnboardResultFields:
                 config = OnboardConfig(
                     namespace="test",
                     hostname="myhost",
-                    role_name="cert-manager",
+                    role_names=("cert-manager",),
                 )
                 result = onboard(ctx, config)
 

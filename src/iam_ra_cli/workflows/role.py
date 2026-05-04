@@ -134,9 +134,11 @@ def delete_role(
     if name not in state.roles:
         return Err(RoleNotFoundError(namespace, name))
 
-    # Check no hosts are using this role
+    # Check no hosts are using this role (v3: role_names is a tuple)
     if not force:
-        hosts_using = tuple(h for h, host in state.hosts.items() if host.role_name == name)
+        hosts_using = tuple(
+            h for h, host in state.hosts.items() if name in host.role_names
+        )
         if hosts_using:
             return Err(RoleInUseError(name, hosts_using))
 
