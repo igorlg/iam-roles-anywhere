@@ -238,6 +238,20 @@ class SecretsFileExistsError:
     path: Path
 
 
+@dataclass(frozen=True, slots=True)
+class SopsPathConflictError:
+    """SOPS path migration found hosts that have BOTH the legacy and the
+    canonical-namespaced SOPS file present.
+
+    This is ambiguous: the two files probably have different contents
+    (otherwise the user would just delete one). Tooling shouldn't guess.
+    The user resolves manually, then reruns the migration.
+    """
+
+    namespace: str
+    hostnames: tuple[str, ...]
+
+
 # =============================================================================
 # K8s Errors
 # =============================================================================

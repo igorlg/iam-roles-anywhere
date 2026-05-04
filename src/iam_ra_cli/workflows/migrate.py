@@ -12,6 +12,7 @@ Idempotent: safe to run multiple times. Skips already-migrated paths/stacks.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from iam_ra_cli.lib import paths
 from iam_ra_cli.lib import state as state_module
@@ -19,6 +20,7 @@ from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.cfn import delete_stack, deploy_stack
 from iam_ra_cli.lib.errors import (
     NotInitializedError,
+    SopsPathConflictError,
     StackDeleteError,
     StackDeployError,
     StateLoadError,
@@ -29,6 +31,8 @@ from iam_ra_cli.lib.sops import (
     SOPS_SCHEMA_VERSION,
     create_secrets_yaml,
     decrypt_file,
+    get_nix_repo_root,
+    get_secrets_path,
     parse_secrets_yaml,
     resolve_existing_secrets_path,
     write_and_encrypt,
@@ -57,7 +61,12 @@ STATE_VERSION_V2 = "2.0.0"
 # =============================================================================
 
 type MigrateError = (
-    NotInitializedError | StateLoadError | StateSaveError | StackDeployError | StackDeleteError
+    NotInitializedError
+    | SopsPathConflictError
+    | StateLoadError
+    | StateSaveError
+    | StackDeployError
+    | StackDeleteError
 )
 
 
@@ -75,6 +84,10 @@ class MigrateResult:
     # files were already v2, or whose files weren't found on this
     # machine, don't appear here.
     sops_files_migrated: list[str] = field(default_factory=list)
+    # Scenario-3 path migration: hostnames whose SOPS file was renamed
+    # from the legacy `iam-ra.yaml` to `iam-ra-<namespace>.yaml`. Only
+    # applicable to the default namespace.
+    sops_paths_renamed: list[str] = field(default_factory=list)
 
 
 # =============================================================================
@@ -378,6 +391,16 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
         if _migrate_host_sops_file(hostname, namespace):
             sops_files_migrated.append(hostname)
 
+    # 9. SOPS path migration (scenario-3 rename: legacy `iam-ra.yaml` ->
+    #    canonical `iam-ra-<namespace>.yaml`). Only meaningful for the
+    #    default namespace; no-op otherwise. Conflicts (both files
+    #    exist) are surfaced as errors - we can't choose one safely.
+    match migrate_sops_paths(ctx, namespace, dry_run=False):
+        case Err() as e:
+            return e
+        case Ok(sops_paths_result):
+            sops_paths_renamed = list(sops_paths_result.renamed)
+
     return Ok(
         MigrateResult(
             s3_migrated=s3_migrated,
@@ -385,5 +408,130 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
             ca_stack_migrated=ca_stack_migrated,
             roles_updated=roles_updated,
             sops_files_migrated=sops_files_migrated,
+            sops_paths_renamed=sops_paths_renamed,
         )
     )
+
+
+# =============================================================================
+# SOPS path migration: rename legacy `iam-ra.yaml` -> `iam-ra-<namespace>.yaml`
+# =============================================================================
+
+
+type MigrateSopsPathsError = (
+    NotInitializedError | SopsPathConflictError | StateLoadError
+)
+
+
+@dataclass(frozen=True)
+class MigrateSopsPathsResult:
+    """Outcome of a SOPS-path migration run.
+
+    - ``renamed``: hostnames whose legacy SOPS file was renamed to the
+      canonical name (dry_run=False).
+    - ``would_rename``: hostnames that WOULD be renamed (dry_run=True).
+      Populated only in dry-run mode.
+    - ``conflicts``: hostnames that have BOTH a legacy and a canonical
+      SOPS file. Workflow returns Err(SopsPathConflictError) before any
+      rename is attempted, so this field is only filled on the happy
+      path when nothing else collides - kept for symmetry.
+    """
+
+    renamed: tuple[str, ...] = ()
+    would_rename: tuple[str, ...] = ()
+    conflicts: tuple[str, ...] = ()
+
+
+def migrate_sops_paths(
+    ctx: AwsContext,
+    namespace: str,
+    *,
+    dry_run: bool = False,
+) -> Result[MigrateSopsPathsResult, MigrateSopsPathsError]:
+    """Rename legacy SOPS files (pre-multi-identity) to the namespace-
+    suffixed canonical form.
+
+    Legacy files are named ``iam-ra.yaml`` and only ever existed for the
+    default namespace (the multi-identity work introduced per-namespace
+    filenames on day one for non-default namespaces). So this workflow
+    is a no-op when called with a non-default namespace.
+
+    Flow:
+
+    1. Load state, iterate over its hosts.
+    2. For each host, check for both legacy (``iam-ra.yaml``) and
+       canonical (``iam-ra-<namespace>.yaml``) under
+       ``secrets/hosts/<host>/`` relative to the Nix flake root.
+    3. If any host has BOTH files present, return
+       ``Err(SopsPathConflictError)`` listing them; no renames happen.
+    4. Otherwise:
+       - dry_run=True: return Ok with ``would_rename`` populated; file
+         system untouched.
+       - dry_run=False: rename each legacy file via ``Path.rename``
+         (atomic on Unix), return Ok with ``renamed`` populated.
+
+    The workflow deliberately does NOT update the user's Nix
+    ``sops.secrets.<...>.sopsFile`` references - we can't safely edit
+    arbitrary Nix code. The CLI layer is responsible for telling the
+    user to update their references after renaming.
+    """
+    # Load state
+    match state_module.load(ctx.ssm, ctx.s3, namespace):
+        case Err(e):
+            return Err(e)
+        case Ok(None):
+            return Err(NotInitializedError(namespace))
+        case Ok(state):
+            pass
+
+    if not state.is_initialized:
+        return Err(NotInitializedError(namespace))
+
+    # Non-default namespaces never had legacy filenames - nothing to do.
+    if namespace != "default":
+        return Ok(MigrateSopsPathsResult())
+
+    repo_root = get_nix_repo_root()
+    if repo_root is None:
+        # No flake = no SOPS files to find. Not an error - some workflows
+        # (CI, fresh clones without onboarding) legitimately lack one.
+        return Ok(MigrateSopsPathsResult())
+
+    # Walk hosts, categorise each
+    to_rename: list[tuple[str, Path, Path]] = []  # (hostname, legacy, canonical)
+    conflicts: list[str] = []
+
+    for hostname in state.hosts:
+        host_dir = repo_root / "secrets" / "hosts" / hostname
+        legacy = host_dir / "iam-ra.yaml"
+        canonical = get_secrets_path(hostname, namespace, repo_root=repo_root)
+
+        if legacy.exists() and canonical.exists():
+            conflicts.append(hostname)
+            continue
+        if legacy.exists():
+            to_rename.append((hostname, legacy, canonical))
+
+    # Bail on conflicts before doing any work.
+    if conflicts:
+        return Err(
+            SopsPathConflictError(
+                namespace=namespace,
+                hostnames=tuple(sorted(conflicts)),
+            )
+        )
+
+    if dry_run:
+        return Ok(
+            MigrateSopsPathsResult(
+                would_rename=tuple(hostname for hostname, _, _ in to_rename),
+            )
+        )
+
+    # Apply: atomic rename for each host
+    renamed: list[str] = []
+    for hostname, legacy, canonical in to_rename:
+        legacy.rename(canonical)
+        renamed.append(hostname)
+
+    return Ok(MigrateSopsPathsResult(renamed=tuple(renamed)))
