@@ -95,8 +95,8 @@ with existing role stacks being per-name. Enables partial teardown
   namespace.
 - **CLI flags + state model** uses `scope` for within-namespace CA
   subdivision. Namespace stays `namespace`.
-- Users generally interact with identities via Nix; CLI users see namespace
-  + scope as they already do.
+- Users generally interact with identities via Nix; CLI users see
+  namespace and scope as they already do.
 
 ### 7. Sequencing: two PRs, each a hard cut
 
@@ -120,7 +120,7 @@ after these land.
 
 ## PR 1: scenario 2 — multi-role, same cert
 
-### Goal
+### PR 1 goal
 
 One host, one cert, multiple AWS roles (all under the same trust anchor /
 same scope / same account). Example: `work-admin`, `work-readonly`,
@@ -271,7 +271,7 @@ Design notes:
   - If user configures `profiles` attrset directly in Nix: legacy path,
     marked as `# MIGRATION_SHIM` for future removal.
 
-### Tests
+### PR 1 tests
 
 TDD per existing pattern:
 
@@ -295,7 +295,7 @@ TDD per existing pattern:
 
 ## PR 2: scenario 3 — multi-namespace identities
 
-### Goal
+### PR 2 goal
 
 One host, multiple certs under different trust anchors / accounts. Example:
 a laptop that needs both `personal-admin` (account A, personal trust
@@ -372,7 +372,7 @@ Separate subcommand of the existing migrate workflow.
 
 **Dry-run mode (default)**:
 
-```
+```text
 $ iam-ra migrate sops-paths
 Scanning secrets/hosts/ for legacy-named SOPS files...
 Found 2 legacy files:
@@ -385,7 +385,7 @@ Nix references (e.g. sops.secrets.<...>.sopsFile = ...) to match.
 
 **Apply mode**:
 
-```
+```text
 $ iam-ra migrate sops-paths --apply
 Renamed: secrets/hosts/web-01/iam-ra.yaml → iam-ra-default.yaml
 Renamed: secrets/hosts/db-01/iam-ra.yaml → iam-ra-default.yaml
@@ -403,7 +403,7 @@ Add a validation layer in `iam-ra host onboard`: before issuing a cert,
 compare `ctx.account_id` (current AWS credentials) against
 `state.namespace_info.account_id`. If mismatched, fail fast:
 
-```
+```text
 Error: Namespace 'personal' is in AWS account 987098549565, but your
 current AWS credentials are for account 718758479978. Use AWS_PROFILE or
 --profile to switch to the correct account.
@@ -411,7 +411,7 @@ current AWS credentials are for account 718758479978. Use AWS_PROFILE or
 
 This catches the very common "forgot to switch AWS profiles" footgun.
 
-### Tests
+### PR 2 tests
 
 - Nix module evaluation tests (`nix flake check`): verify `identities` with
   multiple entries produces correct `programs.awscli.profiles`.
@@ -533,7 +533,7 @@ TDD per project convention:
    moto to mock AWS.
 4. Write command tests for CLI surface (JSON outputs, error cases).
 5. For PR 2: Nix flake check tests, `iam-ra migrate sops-paths` dry-run
-   + apply tests with tmp_path fixtures.
+   and apply tests with tmp_path fixtures.
 
 Existing CI tooling (`nix.yaml`, `python.yaml`, `docs.yaml`) handles the
 rest. No new workflows needed.
