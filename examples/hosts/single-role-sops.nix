@@ -8,15 +8,19 @@
 #   iam-ra role create admin --policy arn:aws:iam::aws:policy/AdministratorAccess
 #   iam-ra host onboard myhost --role admin
 #
+# The CLI writes the SOPS file at secrets/hosts/myhost/iam-ra-default.yaml
+# - reference that path below, or copy to ./secrets/ as shown.
+#
 { config, ... }:
 {
-  # SOPS secrets configuration
+  # SOPS secrets configuration. Both cert and key live in the same
+  # SOPS file - reading different keys from it.
   sops.secrets."iam-ra/cert" = {
-    sopsFile = ./secrets/iam-ra.yaml;
+    sopsFile = ./secrets/iam-ra-default.yaml;
     key = "certificate";
   };
   sops.secrets."iam-ra/key" = {
-    sopsFile = ./secrets/iam-ra.yaml;
+    sopsFile = ./secrets/iam-ra-default.yaml;
     key = "private_key";
   };
 
@@ -24,19 +28,19 @@
     enable = true;
     user = "alice"; # The user who will use AWS credentials
 
-    # Certificate paths from SOPS
-    certificate = {
-      certPath = config.sops.secrets."iam-ra/cert".path;
-      keyPath = config.sops.secrets."iam-ra/key".path;
-    };
+    identities.default = {
+      # Certificate paths from SOPS
+      certificate = {
+        certPath = config.sops.secrets."iam-ra/cert".path;
+        keyPath = config.sops.secrets."iam-ra/key".path;
+      };
 
-    # AWS configuration - get these from: iam-ra status --json
-    trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/abc123";
-    region = "ap-southeast-2";
+      # AWS configuration - get these from: iam-ra status --json
+      trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/abc123";
+      region = "ap-southeast-2";
 
-    # Single profile
-    profiles = {
-      admin = {
+      # Single profile
+      profiles.admin = {
         profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin-profile";
         roleArn = "arn:aws:iam::123456789012:role/iam-ra-admin";
         makeDefault = true; # This profile becomes [default] in ~/.aws/config

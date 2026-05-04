@@ -6,11 +6,13 @@ This directory contains example Nix configurations for hosts using IAM Roles Any
 
 | Example | Description |
 |---------|-------------|
+| [`minimal.nix`](minimal.nix) | Minimal configuration (single identity, single role) |
 | [`single-role-sops.nix`](single-role-sops.nix) | Single role with SOPS secrets |
 | [`single-role-agenix.nix`](single-role-agenix.nix) | Single role with agenix secrets |
-| [`multi-role.nix`](multi-role.nix) | Multiple roles, one host |
-| [`minimal.nix`](minimal.nix) | Minimal configuration |
-| [`full-options.nix`](full-options.nix) | All available options |
+| [`multi-role.nix`](multi-role.nix) | Multiple roles, one host, one identity (same AWS account) |
+| [`multi-role-sops.nix`](multi-role-sops.nix) | Multi-role with SOPS (scenario 2, v2 SOPS schema) |
+| [`multi-identity.nix`](multi-identity.nix) | **Cross-account** - one laptop, two AWS accounts (scenario 3) |
+| [`full-options.nix`](full-options.nix) | All available options within a single identity |
 
 ## Prerequisites
 

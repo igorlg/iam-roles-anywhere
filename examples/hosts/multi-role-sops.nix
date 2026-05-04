@@ -1,7 +1,10 @@
-# Multi-Role with SOPS (v2 SOPS schema)
+# Multi-Role with SOPS (v2 SOPS schema, scenario 2)
 #
-# Scenario 2 of the multi-identity plan: one host cert authenticates against
-# multiple IAM roles, all under the same AWS Roles Anywhere trust anchor.
+# Scenario 2 of the multi-identity plan: one host cert authenticates
+# against multiple IAM roles, all under the same AWS Roles Anywhere
+# trust anchor and the same AWS account. That means ONE identity with
+# MANY profiles - the certificate is shared. For cross-account
+# (different trust anchors, different accounts) see ./multi-identity.nix.
 #
 # Pair this example with the scenario-2 CLI workflow:
 #
@@ -19,26 +22,27 @@
 #   # Renew the cert while keeping all roles:
 #   iam-ra host rotate-cert workstation
 #
-# The CLI writes a v2 SOPS file at secrets/hosts/workstation/iam-ra.yaml with:
+# The CLI writes a v2 SOPS file at secrets/hosts/workstation/iam-ra-default.yaml
+# with:
 #   - certificate / private_key (top-level - same as v1, SOPS wiring below
 #     continues to work)
 #   - account_id, trust_anchor_arn, region (top-level metadata)
 #   - profiles: { admin: {...}, readonly: {...}, deploy: {...} } (nested map)
 #
-# The ARNs below are not secrets - they can live in plain Nix alongside the
-# encrypted cert/key. `iam-ra host onboard --json` outputs them in a
-# machine-readable shape for pasting.
+# The ARNs below are not secrets - they can live in plain Nix alongside
+# the encrypted cert/key. `iam-ra host onboard --json` outputs them in
+# a machine-readable shape for pasting.
 #
 { config, ... }:
 {
-  # Same SOPS file, same wiring as single-role-sops.nix. v2 puts certificate
-  # and private_key at the top of the YAML just like v1 did.
+  # Same SOPS file, same wiring as single-role-sops.nix. v2 puts
+  # certificate and private_key at the top of the YAML just like v1.
   sops.secrets."iam-ra/cert" = {
-    sopsFile = ./secrets/iam-ra.yaml;
+    sopsFile = ./secrets/iam-ra-default.yaml;
     key = "certificate";
   };
   sops.secrets."iam-ra/key" = {
-    sopsFile = ./secrets/iam-ra.yaml;
+    sopsFile = ./secrets/iam-ra-default.yaml;
     key = "private_key";
   };
 
@@ -46,33 +50,35 @@
     enable = true;
     user = "alice";
 
-    # One certificate - shared across all profiles below
-    certificate = {
-      certPath = config.sops.secrets."iam-ra/cert".path;
-      keyPath = config.sops.secrets."iam-ra/key".path;
-    };
-
-    trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/abc123";
-    region = "ap-southeast-2";
-    sessionDuration = 3600;
-
-    # Multiple profiles - one per role. Add / remove entries here to match
-    # `iam-ra host add-role` / `remove-role` invocations.
-    profiles = {
-      admin = {
-        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin-profile";
-        roleArn = "arn:aws:iam::123456789012:role/iam-ra-admin";
-        sessionDuration = 900; # shorter for admin
+    identities.default = {
+      # One certificate - shared across all profiles in this identity.
+      certificate = {
+        certPath = config.sops.secrets."iam-ra/cert".path;
+        keyPath = config.sops.secrets."iam-ra/key".path;
       };
-      readonly = {
-        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/readonly-profile";
-        roleArn = "arn:aws:iam::123456789012:role/iam-ra-readonly";
-        makeDefault = true; # safest default
-      };
-      deploy = {
-        profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/deploy-profile";
-        roleArn = "arn:aws:iam::123456789012:role/iam-ra-deploy";
-        sessionDuration = 7200;
+
+      trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/abc123";
+      region = "ap-southeast-2";
+      sessionDuration = 3600;
+
+      # Multiple profiles - one per role. Add/remove entries here to
+      # match your `iam-ra host add-role` / `remove-role` invocations.
+      profiles = {
+        admin = {
+          profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin-profile";
+          roleArn = "arn:aws:iam::123456789012:role/iam-ra-admin";
+          sessionDuration = 900; # shorter for admin
+        };
+        readonly = {
+          profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/readonly-profile";
+          roleArn = "arn:aws:iam::123456789012:role/iam-ra-readonly";
+          makeDefault = true; # safest default
+        };
+        deploy = {
+          profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/deploy-profile";
+          roleArn = "arn:aws:iam::123456789012:role/iam-ra-deploy";
+          sessionDuration = 7200;
+        };
       };
     };
   };

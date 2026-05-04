@@ -6,7 +6,8 @@
 #   iam-ra init
 #   iam-ra role create admin --policy arn:aws:iam::aws:policy/AdministratorAccess
 #   iam-ra host onboard myhost --role admin --no-sops
-#   # Then manually create age-encrypted secrets
+#   # Then manually re-encrypt the cert/key under age and drop them in
+#   # the locations referenced below.
 #
 { config, ... }:
 {
@@ -24,18 +25,18 @@
     enable = true;
     user = "alice";
 
-    # Certificate paths from agenix
-    certificate = {
-      certPath = config.age.secrets.iam-ra-cert.path;
-      keyPath = config.age.secrets.iam-ra-key.path;
-    };
+    identities.default = {
+      # Certificate paths from agenix
+      certificate = {
+        certPath = config.age.secrets.iam-ra-cert.path;
+        keyPath = config.age.secrets.iam-ra-key.path;
+      };
 
-    # AWS configuration
-    trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/abc123";
-    region = "ap-southeast-2";
+      # AWS configuration
+      trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/abc123";
+      region = "ap-southeast-2";
 
-    profiles = {
-      admin = {
+      profiles.admin = {
         profileArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/admin-profile";
         roleArn = "arn:aws:iam::123456789012:role/iam-ra-admin";
         makeDefault = true;
