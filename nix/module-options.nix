@@ -209,6 +209,44 @@ in
   enable = lib.mkEnableOption "IAM Roles Anywhere authentication";
 
   # ===================
+  # CREDENTIAL PROCESS FORMAT
+  # ===================
+  # By default the AWS config entry contains a single-line
+  # `credential_process` command running several hundred characters:
+  # the aws_signing_helper nix-store path, all certificate paths, all
+  # ARNs, region, duration. Setting this option to true replaces that
+  # inline command with an absolute path to a per-profile shell
+  # wrapper script at ~/.aws/iam-ra/<awsProfileName>.sh - far more
+  # readable when inspecting ~/.aws/config or debugging, at the cost
+  # of one extra file per profile under $HOME/.aws/iam-ra/.
+
+  useCredentialProcessWrapper = lib.mkOption {
+    type = lib.types.bool;
+    default = false;
+    description = ''
+      If true, write each profile's credential_process command to a
+      per-profile shell wrapper script at
+      `~/.aws/iam-ra/<awsProfileName>.sh` and reference it from
+      `~/.aws/config` by absolute path, instead of embedding the full
+      command inline in the config file.
+
+      Rationale: the inline form (default, false) produces very long
+      `credential_process =` lines in `~/.aws/config` - the
+      aws_signing_helper store path plus certificate paths plus several
+      ARNs plus region/duration - which is hard to read or diff. With
+      this flag enabled, `~/.aws/config` contains just an absolute
+      path to a short shell script; the script itself is managed
+      declaratively by home-manager (content is regenerated on every
+      activation) and contains `exec` of the signing helper with all
+      arguments single-quoted for safety.
+
+      Defaults to false (inline) to preserve the existing behaviour;
+      opt in when you want a cleaner `~/.aws/config`.
+    '';
+    example = true;
+  };
+
+  # ===================
   # IDENTITIES
   # ===================
   # One entry per (cert, trust anchor, AWS account). Most users have a

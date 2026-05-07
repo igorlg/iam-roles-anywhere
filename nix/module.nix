@@ -57,8 +57,13 @@ let
       # Import component modules
       packagesConfig = import ./module-packages.nix { inherit pkgs; };
       awsProfileConfig = import ./module-aws-profile.nix {
-        inherit lib cfg pkgs;
-        inherit (iamRaLib) mkCredentialProcessCommand;
+        inherit
+          lib
+          cfg
+          config
+          pkgs
+          ;
+        inherit (iamRaLib) mkCredentialProcessCommand mkCredentialProcessScript;
       };
       validationConfig = import ./module-validation.nix { inherit lib cfg iamRaLib; };
     in
@@ -123,7 +128,7 @@ let
 
           programs.iamRolesAnywhere = {
             enable = true;
-            inherit (cfg) identities;
+            inherit (cfg) identities useCredentialProcessWrapper;
           };
         };
 
