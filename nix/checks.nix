@@ -185,6 +185,99 @@ let
     echo "PASS" > $out/result
   '';
 
+  # Contract test for the credential_process wrapper script. The
+  # script shape is part of the module's public contract (users may
+  # `cat ~/.aws/iam-ra/<profile>.sh` when debugging); keep the matches
+  # below strict enough to catch regressions like lost shebang / lost
+  # quoting / missing exec.
+  test-lib-credential-script = pkgs.runCommand "test-iam-ra-credential-script" { } ''
+    echo "Testing credential wrapper script generation..."
+    ${
+      let
+        # certificatePath intentionally contains a space so we can
+        # assert lib.escapeShellArg quotes values that actually need
+        # it. (Nixpkgs's escapeShellArg is optimised to skip quotes
+        # for strings of only [alnum,._+:@%/-], so a plain path
+        # wouldn't exercise the quoting path.)
+        script = self.lib.mkCredentialProcessScript {
+          signingHelperPath = "/nix/store/fake/bin/aws_signing_helper";
+          certificatePath = "/tmp/has space/cert.pem";
+          privateKeyPath = "/run/secrets/key.pem";
+          trustAnchorArn = testArns.trustAnchor;
+          profileArn = testArns.profile;
+          roleArn = testArns.role;
+          region = "ap-southeast-2";
+          sessionDuration = 3600;
+        };
+        # Substring checks via lib.hasInfix - cleaner than regex for
+        # multi-line content (Nix's builtins.match is POSIX ERE and
+        # does not cross newlines reliably).
+        has = sub: lib.hasInfix sub script;
+        hasShebang = has "#!/usr/bin/env bash";
+        hasExec = has "exec ";
+        hasHelper = has "aws_signing_helper";
+        hasCert = has "--certificate";
+        hasKey = has "--private-key";
+        hasKeyPath = has "/run/secrets/key.pem";
+        hasTrustAnchor = has "--trust-anchor-arn";
+        hasProfileArn = has "--profile-arn";
+        hasRoleArn = has "--role-arn";
+        hasRegion = has "--region";
+        hasRegionValue = has "ap-southeast-2";
+        hasDuration = has "--session-duration";
+        hasDurationValue = has "3600";
+        # Values with shell metacharacters (spaces here) MUST be
+        # quoted by lib.escapeShellArg - otherwise the wrapper script
+        # breaks when any real-world path contains special chars.
+        hasQuotedCertPath = has "'/tmp/has space/cert.pem'";
+      in
+      if
+        hasShebang
+        && hasExec
+        && hasHelper
+        && hasCert
+        && hasKey
+        && hasKeyPath
+        && hasTrustAnchor
+        && hasProfileArn
+        && hasRoleArn
+        && hasRegion
+        && hasRegionValue
+        && hasDuration
+        && hasDurationValue
+        && hasQuotedCertPath
+      then
+        ''
+          echo "PASS: Credential wrapper script generation works"
+        ''
+      else
+        ''
+          echo "FAIL: Credential wrapper script generation incorrect"
+          echo "Generated script:"
+          cat <<'SCRIPT_EOF'
+          ${script}
+          SCRIPT_EOF
+          echo "hasShebang=${toString hasShebang}"
+          echo "hasExec=${toString hasExec}"
+          echo "hasHelper=${toString hasHelper}"
+          echo "hasCert=${toString hasCert}"
+          echo "hasKey=${toString hasKey}"
+          echo "hasKeyPath=${toString hasKeyPath}"
+          echo "hasTrustAnchor=${toString hasTrustAnchor}"
+          echo "hasProfileArn=${toString hasProfileArn}"
+          echo "hasRoleArn=${toString hasRoleArn}"
+          echo "hasRegion=${toString hasRegion}"
+          echo "hasRegionValue=${toString hasRegionValue}"
+          echo "hasDuration=${toString hasDuration}"
+          echo "hasDurationValue=${toString hasDurationValue}"
+          echo "hasQuotedCertPath=${toString hasQuotedCertPath}"
+          exit 1
+        ''
+    }
+    mkdir -p $out
+    echo "PASS" > $out/result
+  '';
+
   # ===================
   # Module Existence Tests
   # ===================
@@ -386,6 +479,76 @@ let
     };
   };
 
+  # Wrapper-scripts feature: when useCredentialProcessWrapper = true,
+  # the module emits ~/.aws/iam-ra/<profile>.sh files and points
+  # credential_process at the absolute path instead of embedding the
+  # full command inline. This test exercises the single-identity path.
+  test-home-wrapper-scripts = mkTestHome {
+    extraConfig = {
+      programs.iamRolesAnywhere = {
+        enable = true;
+        useCredentialProcessWrapper = true;
+        identities.default = {
+          trustAnchorArn = testArns.trustAnchor;
+          region = "ap-southeast-2";
+          certificate = {
+            certPath = "/run/secrets/cert.pem";
+            keyPath = "/run/secrets/key.pem";
+          };
+          profiles = {
+            admin = {
+              profileArn = testArns.profileAdmin;
+              roleArn = testArns.roleAdmin;
+              makeDefault = true;
+            };
+            readonly = {
+              profileArn = testArns.profileReadonly;
+              roleArn = testArns.roleReadonly;
+            };
+          };
+        };
+      };
+    };
+  };
+
+  # Wrapper-scripts + multi-identity. Cross-account with wrapper on;
+  # each profile across identities gets its own script file.
+  test-home-wrapper-scripts-multi-identity = mkTestHome {
+    extraConfig = {
+      programs.iamRolesAnywhere = {
+        enable = true;
+        useCredentialProcessWrapper = true;
+        identities = {
+          work = {
+            trustAnchorArn = testArns.trustAnchor;
+            region = "ap-southeast-2";
+            certificate = {
+              certPath = "/run/secrets/iam-ra/work/cert.pem";
+              keyPath = "/run/secrets/iam-ra/work/key.pem";
+            };
+            profiles.work-admin = {
+              profileArn = testArns.profileAdmin;
+              roleArn = testArns.roleAdmin;
+              makeDefault = true;
+            };
+          };
+          personal = {
+            trustAnchorArn = testArns.trustAnchorPersonal;
+            region = "ap-southeast-2";
+            certificate = {
+              certPath = "/run/secrets/iam-ra/personal/cert.pem";
+              keyPath = "/run/secrets/iam-ra/personal/key.pem";
+            };
+            profiles.personal-admin = {
+              profileArn = testArns.profilePersonal;
+              roleArn = testArns.rolePersonal;
+            };
+          };
+        };
+      };
+    };
+  };
+
   # ===================
   # Negative Tests (assertion coverage)
   # ===================
@@ -485,6 +648,7 @@ in
   iam-ra-lib-loads = test-lib-loads;
   iam-ra-lib-validation = test-lib-validation;
   iam-ra-lib-credential-command = test-lib-credential-command;
+  iam-ra-lib-credential-script = test-lib-credential-script;
 
   # Module existence tests
   iam-ra-home-module-exists = test-home-module-exists;
@@ -497,6 +661,8 @@ in
   iam-ra-home-multi-profile = test-home-multi-profile;
   iam-ra-home-multi-profile-custom = test-home-multi-profile-custom;
   iam-ra-home-multi-identity = test-home-multi-identity;
+  iam-ra-home-wrapper-scripts = test-home-wrapper-scripts;
+  iam-ra-home-wrapper-scripts-multi-identity = test-home-wrapper-scripts-multi-identity;
 
   # Validation assertion tests (negative - config SHOULD fail)
   iam-ra-empty-identities-fails = test-empty-identities-fails;
