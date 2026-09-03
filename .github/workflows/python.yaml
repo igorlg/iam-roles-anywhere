@@ -3,6 +3,11 @@
 # Runs on every push to feature branches when Python source, tests, deps,
 # or the Python version changes. Nix package build coverage is handled by
 # nix.yaml (which also triggers on src/**) rather than duplicated here.
+#
+# Tests run on Linux and macOS. macOS coverage is required because some
+# KeyStore backends are platform-specific (the macosKeychain backend shells out
+# to /usr/bin/security), so Linux-only CI would leave them untested. Type
+# checking and linting are platform-independent and run on Linux only.
 
 name: Python
 
@@ -20,8 +25,15 @@ on:
 
 jobs:
   test:
-    name: Python Tests
-    runs-on: ubuntu-latest
+    name: Python Tests (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is Apple Silicon (arm64).
+        runner:
+          - ubuntu-latest
+          - macos-latest
 
     steps:
       - name: Checkout
@@ -40,9 +52,11 @@ jobs:
         run: uv run pytest tests/ -v --cov=src/iam_ra_cli --cov-report=xml
 
       - name: Type check
+        if: matrix.runner == 'ubuntu-latest'
         run: uv run mypy src/iam_ra_cli --ignore-missing-imports
 
       - name: Lint
+        if: matrix.runner == 'ubuntu-latest'
         run: uv run ruff check src/iam_ra_cli
 
       - name: Verify CLI loads
