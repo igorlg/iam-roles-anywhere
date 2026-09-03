@@ -40,6 +40,7 @@ def create_role(
     *,
     trust_anchor_arn: str,
     scope: str = "default",
+    allowed_subject_cn: str = "*",
 ) -> Result[RoleResult, StackDeployError]:
     """Create an IAM role with Roles Anywhere profile.
 
@@ -51,6 +52,10 @@ def create_role(
         session_duration: Session duration in seconds (900-43200)
         trust_anchor_arn: Trust Anchor ARN for the role's scope
         scope: CA scope this role belongs to
+        allowed_subject_cn: StringLike pattern the authenticating certificate's
+            subject CN must match. "*" (default) adds no condition at all,
+            leaving the role assumable by any certificate under the scope's
+            trust anchor - the historical behaviour.
     """
     stack_name = _stack_name(namespace, name)
     template = _load_template(ROLE_TEMPLATE)
@@ -60,6 +65,7 @@ def create_role(
         "RoleName": name,
         "TrustAnchorArn": trust_anchor_arn,
         "SessionDuration": str(session_duration),
+        "AllowedSubjectCN": allowed_subject_cn,
     }
     if policies:
         params["PolicyArns"] = ",".join(policies)

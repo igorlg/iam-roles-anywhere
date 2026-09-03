@@ -29,6 +29,23 @@ Parameters:
       for AWS::IAM::Role.MaxSessionDuration, which AWS requires to be >= 3600.
       The same value is used for AWS::RolesAnywhere::Profile.DurationSeconds.
 
+  AllowedSubjectCN:
+    Type: String
+    Default: "*"
+    Description: >-
+      Which host certificates may assume this role, matched against the
+      certificate subject Common Name with StringLike (so "web-*" works).
+      Default "*" means any certificate under the scope's trust anchor, which is
+      the historical behaviour; the condition is then omitted entirely rather
+      than being written as a wildcard match.
+
+      IAM Roles Anywhere populates aws:PrincipalTag/x509Subject/CN from the
+      authenticating certificate by default. Note that setting a custom
+      attributeMappings on the Profile which omits the Subject CN specifier
+      would drop the tag, and a StringLike condition on an absent tag evaluates
+      FALSE - i.e. this role would stop being assumable. This template sets no
+      attribute mappings, so the default mapping applies.
+
 Outputs:
   Version:
     Description: Template version
@@ -44,6 +61,10 @@ Outputs:
 
 Conditions:
   HasPolicies: !Not [!Equals [!Join ["", !Ref PolicyArns], ""]]
+  # Only restrict when asked. With the default "*" the trust policy is emitted
+  # exactly as it was before this parameter existed - no new condition key -
+  # so upgrading cannot change who can assume an existing role.
+  RestrictSubjectCN: !Not [!Equals [!Ref AllowedSubjectCN, "*"]]
 
 Resources:
   Role:
@@ -61,9 +82,17 @@ Resources:
               - sts:AssumeRole
               - sts:TagSession
               - sts:SetSourceIdentity
-            Condition:
-              ArnEquals:
-                aws:SourceArn: !Ref TrustAnchorArn
+            # aws:SourceArn pins the trust anchor, which is what scopes a role
+            # to one CA. On its own it lets ANY certificate under that CA assume
+            # this role; AllowedSubjectCN narrows that to specific hosts.
+            Condition: !If
+              - RestrictSubjectCN
+              - ArnEquals:
+                  aws:SourceArn: !Ref TrustAnchorArn
+                StringLike:
+                  aws:PrincipalTag/x509Subject/CN: !Ref AllowedSubjectCN
+              - ArnEquals:
+                  aws:SourceArn: !Ref TrustAnchorArn
       ManagedPolicyArns: !If
         - HasPolicies
         - !Ref PolicyArns

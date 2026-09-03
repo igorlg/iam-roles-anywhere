@@ -237,8 +237,9 @@ class KeyAlreadyExistsError:
     """A key already exists for this label and overwrite was not requested.
 
     Overwriting silently would strand the previously issued certificate,
-    which stays valid against the trust anchor until it expires (there is
-    no revocation), so this is deliberately opt-in.
+    which stays valid against the trust anchor until it expires unless a CRL
+    revoking it is imported - something this tool does not do. So replacing a
+    key is deliberately opt-in.
     """
 
     backend: str

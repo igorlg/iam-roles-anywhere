@@ -106,9 +106,12 @@ def offboard(
     the Secrets Manager secrets) plus its S3 objects. For a v4 host there is
     nothing in AWS to remove, so it is purely a state deletion.
 
-    Note this does **not** revoke the certificate. There is no revocation
-    mechanism, so an offboarded host's certificate stays valid against the trust
-    anchor until it expires. Short certificate lifetimes are the mitigation.
+    Note this does **not** revoke the certificate. IAM Roles Anywhere does
+    support revocation via CRLs imported with its ImportCrl API (CDP and OCSP
+    callbacks are not supported), but this tool does not generate or import one.
+    So an offboarded host's certificate stays valid against the trust anchor
+    until it expires. Short certificate lifetimes are the mitigation available
+    today.
     """
     match state_module.load(ctx.ssm, ctx.s3, namespace):
         case Err(e):

@@ -115,6 +115,12 @@ class Role:
     The scope field determines which CA/Trust Anchor this role
     is associated with. Certs signed by a scope's CA can only
     assume roles within that same scope.
+
+    v4 adds `allowed_subject_cn`: a StringLike pattern the authenticating
+    certificate's subject CN must match, enforced by a condition on
+    ``aws:PrincipalTag/x509Subject/CN`` in the role's trust policy. ``"*"``
+    (the default, and what pre-v4 state implies) adds no condition, so any
+    certificate under the scope's trust anchor can assume the role.
     """
 
     stack_name: str
@@ -122,6 +128,7 @@ class Role:
     profile_arn: Arn
     policies: tuple[Arn, ...] = ()
     scope: str = "default"
+    allowed_subject_cn: str = "*"
 
 
 @dataclass(frozen=True)

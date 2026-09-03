@@ -52,7 +52,8 @@ def offboard_host(
     this entirely for v4 hosts, which have no stack and no S3 objects.
 
     Note this does not revoke anything: an already-issued certificate stays
-    valid against the trust anchor until it expires, in both versions.
+    valid against the trust anchor until it expires. IAM Roles Anywhere can
+    revoke via an imported CRL (ImportCrl), but this tool does not manage CRLs.
     """
     # Delete stack first
     match delete_stack(ctx.cfn, stack_name):

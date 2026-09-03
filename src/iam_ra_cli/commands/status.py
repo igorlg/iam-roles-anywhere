@@ -52,6 +52,7 @@ def status(
         #     "roles": [ { "name": str, "scope": str,
         #                  "role_arn": str, "profile_arn": str,
         #                  "policies": [str],
+        #                  "allowed_subject_cn": str,
         #                  "internal": { "stack_name": str } }, ... ],
         #     "hosts": [ { "hostname": str, "role_names": [str, ...],
         #                  "scope": str,
@@ -89,6 +90,9 @@ def status(
                 "role_arn": str(role.role_arn),
                 "profile_arn": str(role.profile_arn),
                 "policies": [str(p) for p in role.policies],
+                # "*" means no trust-policy restriction on which host may assume
+                # the role - any certificate under the scope's trust anchor can.
+                "allowed_subject_cn": role.allowed_subject_cn,
                 "internal": {"stack_name": role.stack_name},
             }
             for name, role in sorted(current.roles.items())

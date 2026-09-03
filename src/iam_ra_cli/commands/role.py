@@ -42,6 +42,18 @@ def role() -> None:
     show_default=True,
     help="Session duration in seconds (900-43200)",
 )
+@click.option(
+    "--allowed-hosts",
+    default="*",
+    show_default=True,
+    metavar="PATTERN",
+    help=(
+        "Restrict which hosts may assume this role, matched against the "
+        "certificate subject CN. Supports wildcards, e.g. 'web-*'. The default "
+        "'*' adds no restriction, so any certificate under the scope's trust "
+        "anchor can assume it."
+    ),
+)
 def role_create(
     name: str,
     namespace: str,
@@ -50,22 +62,35 @@ def role_create(
     policies: tuple[str, ...],
     scope: str,
     session_duration: int,
+    allowed_hosts: str,
 ) -> None:
     """Create an IAM role with Roles Anywhere profile.
 
     NAME is the logical name for this role.
+
+    By default any host whose certificate chains to the scope's trust anchor can
+    assume the role. Pass --allowed-hosts to narrow that to specific hostnames,
+    which is enforced in the role's trust policy against the certificate subject
+    CN.
 
     \b
     Examples:
       iam-ra role create admin --policy arn:aws:iam::aws:policy/AdministratorAccess
       iam-ra role create cert-manager --scope cert-manager --policy arn:...
       iam-ra role create dev --policy arn:aws:iam::123:policy/DevPolicy --session-duration 7200
+      iam-ra role create deploy --policy arn:... --allowed-hosts 'ci-*'
+      iam-ra role create admin --policy arn:... --allowed-hosts mbp
     """
     click.echo(f"Creating role: {name}")
     echo_key_value("Namespace", namespace, indent=1)
     echo_key_value("Scope", scope, indent=1)
     echo_key_value("Policies", len(policies), indent=1)
     echo_key_value("Session duration", f"{session_duration}s", indent=1)
+    echo_key_value(
+        "Allowed hosts",
+        "any host in this scope" if allowed_hosts == "*" else allowed_hosts,
+        indent=1,
+    )
     click.echo()
 
     ctx = make_context(region, profile)
@@ -78,6 +103,7 @@ def role_create(
             list(policies) if policies else None,
             session_duration,
             scope=scope,
+            allowed_subject_cn=allowed_hosts,
         ),
         success_message=f"Role '{name}' ready!",
     )
@@ -87,9 +113,22 @@ def role_create(
     echo_key_value("Profile ARN", str(new_role.profile_arn), indent=1)
     echo_key_value("Scope", new_role.scope, indent=1)
 
+    if new_role.allowed_subject_cn == "*":
+        click.echo()
+        click.secho(
+            "Note: any host certificate under this scope's trust anchor can "
+            "assume this role.",
+            dim=True,
+        )
+        click.secho(
+            "      Pass --allowed-hosts to restrict it to named hosts.", dim=True
+        )
+    else:
+        echo_key_value("Allowed hosts", new_role.allowed_subject_cn, indent=1)
+
     click.echo()
     click.echo("Next step:")
-    click.echo(f"  Onboard a host: iam-ra host onboard <hostname> --role {name}")
+    click.echo(f"  Enrol a host: iam-ra host enroll <hostname> --role {name}")
 
 
 @role.command("delete")

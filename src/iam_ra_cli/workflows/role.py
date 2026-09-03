@@ -47,6 +47,7 @@ def create_role(
     session_duration: int = 3600,
     *,
     scope: str = "default",
+    allowed_subject_cn: str = "*",
 ) -> Result[Role, CreateRoleError]:
     """Create or update an IAM role with Roles Anywhere profile.
 
@@ -58,6 +59,11 @@ def create_role(
     2. Validate scope exists (has a CA set up)
     3. Deploy role stack with scope's Trust Anchor ARN
     4. Update state with scope
+
+    `allowed_subject_cn` narrows which host certificates may assume the role,
+    via a condition on the certificate subject CN. The default "*" adds no
+    condition, leaving the role assumable by any certificate under the scope's
+    trust anchor.
     """
     # Load state
     match state_module.load(ctx.ssm, ctx.s3, namespace):
@@ -93,6 +99,7 @@ def create_role(
         session_duration,
         trust_anchor_arn=trust_anchor_arn,
         scope=scope,
+        allowed_subject_cn=allowed_subject_cn,
     ):
         case Err() as e:
             return e
@@ -106,6 +113,7 @@ def create_role(
         profile_arn=role_result.profile_arn,
         policies=role_result.policies,
         scope=scope,
+        allowed_subject_cn=allowed_subject_cn,
     )
 
     # Update state (always -- policies may have changed)

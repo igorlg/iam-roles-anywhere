@@ -33,7 +33,7 @@ This is not a change that can be made compatibly, so **v3 requires re-enrolling 
 | State schema | v3 | v4 |
 | Nix `certificate` options | `certPath` + `keyPath` | tagged union with `source = "files" \| "macosKeychain" \| ...` |
 | Nix lib credential helpers | `certificatePath` + `privateKeyPath` args | single `certificate` arg (the tagged union) |
-| Role trust policy | trust anchor only | optional per-host CN condition |
+| Role trust policy | trust anchor only | optional per-host CN condition via `--allowed-hosts` (default unchanged) |
 
 ## Nix module: certificate options
 
@@ -160,7 +160,7 @@ iam-ra host request <hostname> --overwrite --out new.csr
 iam-ra host approve <hostname> --role <role> --csr new.csr --overwrite --out new.pem
 ```
 
-Note the old certificate remains valid until it expires — there is no revocation in either version.
+Note the old certificate remains valid until it expires. See [Revocation](#revocation) below — it is possible, but this tool does not do it for you.
 
 ### `iam-ra host add-role` / `remove-role` behaviour changed
 
@@ -219,6 +219,60 @@ it costs reliability and buys close to nothing.
   no command to delete a bare private key. Such a key is inert: non-extractable, and unusable without
   a certificate to select it.
 
+## Per-host role restriction
+
+`iam-ra role create` gained `--allowed-hosts`.
+
+Previously — and still, by default — a role's trust policy conditioned only on the trust anchor, so
+**any** certificate under a scope's CA could assume **any** role in that scope. Scope was the only
+isolation boundary. Now you can narrow a role to specific hosts:
+
+```bash
+iam-ra role create deploy --policy arn:... --allowed-hosts 'ci-*'
+iam-ra role create admin  --policy arn:... --allowed-hosts mbp
+```
+
+This adds a `StringLike` condition on `aws:PrincipalTag/x509Subject/CN`, which IAM Roles Anywhere
+populates from the authenticating certificate's subject. It is additive: the `aws:SourceArn`
+trust-anchor pin remains, so removing the confused-deputy protection is not possible by using this.
+
+**The default is unchanged and unrestricted.** With `--allowed-hosts '*'` (the default) the condition
+is omitted from the policy entirely rather than written as a wildcard match. That is deliberate: a
+`StringLike` condition on an *absent* principal tag evaluates false, so emitting a wildcard by default
+would make every role depend on the tag being present and could deny access to anyone whose profile
+drops it. Upgrading therefore cannot change who may assume an existing role.
+
+Two caveats worth knowing:
+
+- This only becomes a real per-host boundary once keys are host-generated. Under v2 the admin held
+  every host's key, so any host's identity could be reproduced.
+- If you attach custom `attributeMappings` to a Roles Anywhere profile and omit the Subject CN
+  specifier, the tag is dropped and a restricted role becomes unassumable. `iam-ra` sets no attribute
+  mappings, so the default mapping applies.
+
+`iam-ra status --json` reports `allowed_subject_cn` per role, so unrestricted roles are auditable.
+
+## Revocation
+
+Neither v2 nor v3 revokes certificates, and `host offboard` does not either — it removes the host
+from state and tears down its AWS resources, but an already-issued certificate keeps authenticating
+until it expires.
+
+This is a gap in **this tool**, not in IAM Roles Anywhere. The service does support revocation, by
+importing a CRL generated from your CA via its
+[`ImportCrl` API](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/trust-model.html);
+certificates are then checked against it. What the service does *not* support is fetching CRLs from a
+distribution point or querying OCSP, so the CRL has to be pushed to it explicitly.
+
+Until `iam-ra` manages CRLs, the practical mitigation is short certificate lifetimes:
+
+```bash
+iam-ra host enroll web01 --role deploy --validity-days 7
+```
+
+That bounds the exposure window for a compromised or offboarded host to the remaining validity, which
+is why v3 makes re-enrolment cheap enough to run on a timer.
+
 ## Migration path
 
 Re-enrolment. There is no in-place upgrade.
@@ -234,14 +288,14 @@ Re-enrolment. There is no in-place upgrade.
        7. clean up: delete v2 host stacks and Secrets Manager secrets
      Also document:
        - state schema v3 -> v4 auto-migration behaviour
-       - what happens to certs issued under v2 (still valid until expiry; no revocation exists)
+       - what happens to certs issued under v2 (still valid until expiry unless a CRL is imported)
 -->
 
 ## Notes carried over from design
 
-- Certificates issued under v2 remain valid against the trust anchor until they expire. There is no
-  revocation mechanism in either version, so **offboarding a host does not invalidate its
-  certificate**. Keep this in mind when planning the cutover.
+- Certificates issued under v2 remain valid against the trust anchor until they expire, so
+  **offboarding a host does not by itself invalidate its certificate**. See
+  [Revocation](#revocation). Keep this in mind when planning the cutover.
 - The `--cert-selector` used by the macOS Keychain backend is mutually exclusive with
   `--certificate` / `--private-key` in `aws_signing_helper`, which is why the Nix options become a
   tagged union rather than gaining extra optional fields.

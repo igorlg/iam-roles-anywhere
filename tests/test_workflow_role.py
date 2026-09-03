@@ -543,6 +543,7 @@ class TestCreateRoleWithScope:
                 3600,
                 trust_anchor_arn=expected_ta_arn,
                 scope="default",
+                allowed_subject_cn="*",
             )
 
     def test_create_role_passes_scope_tag_to_operation(
@@ -595,3 +596,153 @@ class TestCreateRoleWithScope:
             assert isinstance(result, Ok)
             _, kwargs = mock_op.call_args
             assert kwargs["scope"] == "media"
+
+
+
+class TestCreateRoleAllowedSubjectCN:
+    """--allowed-hosts narrows which host certificates may assume a role.
+
+    The default must stay unrestricted, because tightening it implicitly on
+    upgrade would revoke access for every existing host.
+    """
+
+    def _state(self) -> State:
+        return State(
+            namespace="test",
+            region="ap-southeast-2",
+            version="3.0.0-dev",
+            init=Init(
+                stack_name="iam-ra-test-init",
+                bucket_arn=Arn("arn:aws:s3:::test-bucket"),
+                kms_key_arn=Arn("arn:aws:kms:ap-southeast-2:123456789012:key/test-key"),
+            ),
+            cas={
+                "default": CA(
+                    stack_name="iam-ra-test-ca-default",
+                    mode=CAMode.SELF_SIGNED,
+                    trust_anchor_arn=Arn(
+                        "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-123"
+                    ),
+                ),
+            },
+        )
+
+    def _result(self) -> RoleResult:
+        return RoleResult(
+            stack_name="iam-ra-test-role-testrole",
+            role_arn=Arn("arn:aws:iam::123456789012:role/iam-ra-test-testrole"),
+            profile_arn=Arn(
+                "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/p-test"
+            ),
+            policies=(),
+        )
+
+    def test_defaults_to_unrestricted(self, aws_credentials, temp_xdg_dirs) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2", profile=None)
+            setup_state_in_aws(ctx, self._state())
+
+            with patch(
+                "iam_ra_cli.workflows.role.create_role_op", return_value=Ok(self._result())
+            ) as mock_op:
+                result = create_role(ctx, "test", "testrole")
+
+            assert mock_op.call_args.kwargs["allowed_subject_cn"] == "*"
+            assert isinstance(result, Ok)
+            assert result.value.allowed_subject_cn == "*"
+
+    def test_pattern_is_passed_to_the_operation(self, aws_credentials, temp_xdg_dirs) -> None:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2", profile=None)
+            setup_state_in_aws(ctx, self._state())
+
+            with patch(
+                "iam_ra_cli.workflows.role.create_role_op", return_value=Ok(self._result())
+            ) as mock_op:
+                create_role(ctx, "test", "testrole", allowed_subject_cn="ci-*")
+
+            assert mock_op.call_args.kwargs["allowed_subject_cn"] == "ci-*"
+
+    def test_pattern_is_recorded_in_state(self, aws_credentials, temp_xdg_dirs) -> None:
+        """Recorded so `iam-ra status` can show which roles are unrestricted."""
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2", profile=None)
+            setup_state_in_aws(ctx, self._state())
+
+            with patch(
+                "iam_ra_cli.workflows.role.create_role_op", return_value=Ok(self._result())
+            ):
+                create_role(ctx, "test", "testrole", allowed_subject_cn="mbp")
+
+            from iam_ra_cli.lib import state as state_module
+
+            reloaded = state_module.load(ctx.ssm, ctx.s3, "test")
+            assert isinstance(reloaded, Ok)
+            assert reloaded.value.roles["testrole"].allowed_subject_cn == "mbp"
+
+
+class TestRoleOperationPassesTemplateParameter:
+    """The operation must forward the pattern as the CFN parameter, otherwise
+    the trust policy silently stays unrestricted."""
+
+    def test_allowed_subject_cn_becomes_a_stack_parameter(
+        self, aws_credentials, temp_xdg_dirs
+    ) -> None:
+        from iam_ra_cli.operations.role import create_role as create_role_operation
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2", profile=None)
+
+            with patch("iam_ra_cli.operations.role.deploy_stack") as mock_deploy:
+                mock_deploy.return_value = Ok(
+                    {
+                        "RoleArn": "arn:aws:iam::123456789012:role/iam-ra-test-r",
+                        "ProfileArn": (
+                            "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/p"
+                        ),
+                    }
+                )
+                create_role_operation(
+                    ctx,
+                    "test",
+                    "r",
+                    None,
+                    3600,
+                    trust_anchor_arn=(
+                        "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta"
+                    ),
+                    allowed_subject_cn="web-*",
+                )
+
+            params = mock_deploy.call_args.kwargs["parameters"]
+            assert params["AllowedSubjectCN"] == "web-*"
+
+    def test_default_is_still_passed_explicitly(self, aws_credentials, temp_xdg_dirs) -> None:
+        """Passing "*" explicitly matters on stack UPDATE: omitting the
+        parameter would leave a previously-set restriction in place."""
+        from iam_ra_cli.operations.role import create_role as create_role_operation
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2", profile=None)
+
+            with patch("iam_ra_cli.operations.role.deploy_stack") as mock_deploy:
+                mock_deploy.return_value = Ok(
+                    {
+                        "RoleArn": "arn:aws:iam::123456789012:role/iam-ra-test-r",
+                        "ProfileArn": (
+                            "arn:aws:rolesanywhere:ap-southeast-2:123456789012:profile/p"
+                        ),
+                    }
+                )
+                create_role_operation(
+                    ctx,
+                    "test",
+                    "r",
+                    None,
+                    3600,
+                    trust_anchor_arn=(
+                        "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta"
+                    ),
+                )
+
+            assert mock_deploy.call_args.kwargs["parameters"]["AllowedSubjectCN"] == "*"
