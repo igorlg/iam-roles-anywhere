@@ -295,6 +295,21 @@ def parse_and_validate_csr(
     return Ok(csr)
 
 
+def csr_common_name(csr: x509.CertificateSigningRequest) -> str | None:
+    """Return the CN a CSR is asking for, if it has one.
+
+    Needed because the two CA backends differ in how much they trust a CSR's
+    subject. :func:`sign_csr` discards it and rebuilds the subject from the
+    caller's input. ACM Private CA, by contrast, **copies the subject from the
+    CSR** when issuing an end-entity certificate under the
+    EndEntityClientAuthCertificate template, and that template does not permit
+    an API override. So on the PCA path the caller must *verify* the CSR's CN
+    matches the expected hostname instead, and refuse to submit it otherwise.
+    """
+    attrs = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    return str(attrs[0].value) if attrs else None
+
+
 def sign_csr(
     csr_pem: str,
     ca_cert_pem: str,

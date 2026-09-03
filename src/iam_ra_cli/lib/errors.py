@@ -208,6 +208,25 @@ class CsrUnsupportedKeyError:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class CsrSubjectMismatchError:
+    """A CSR asked to be certified under a different name than the host being
+    approved.
+
+    Only relevant on the ACM Private CA path. PCA copies the subject out of the
+    CSR and the EndEntityClientAuthCertificate template does not allow an API
+    override, so unlike the self-signed path we cannot simply rebuild the
+    subject - the mismatch has to be a refusal.
+
+    A benign cause is running `host request` for one hostname and
+    `host approve` for another. The hostile case is a compromised host asking
+    for a certificate that names a different host.
+    """
+
+    expected_common_name: str
+    requested_common_name: str | None
+
+
 # =============================================================================
 # Key Store Errors
 # =============================================================================
@@ -471,7 +490,9 @@ type HostError = (
 )
 type OffboardError = NotInitializedError | HostNotFoundError | StackDeleteError
 type SecretsError = SecretsManagerReadError | SOPSEncryptError | SecretsFileExistsError
-type CsrError = CsrParseError | CsrInvalidSignatureError | CsrUnsupportedKeyError
+type CsrError = (
+    CsrParseError | CsrInvalidSignatureError | CsrUnsupportedKeyError | CsrSubjectMismatchError
+)
 type KeyStoreError = (
     KeyAlreadyExistsError | KeyNotFoundError | KeyStoreOperationError | CsrParseError
 )

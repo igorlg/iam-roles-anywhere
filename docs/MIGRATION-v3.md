@@ -102,6 +102,40 @@ key exists in several places outside the host; re-enrolling replaces it with a h
 `iam-ra host offboard` and `iam-ra destroy` now skip CloudFormation and S3 cleanup for hosts with no
 `stack_name`, since there is nothing in AWS to tear down.
 
+## The new commands
+
+```bash
+# One machine — the common case for a workstation with AWS access.
+iam-ra host enroll mbp --role admin --role readonly
+
+# Two machines — a server with no AWS credentials.
+#   on the host (needs NO AWS credentials at all):
+iam-ra host request web01 --out web01.csr
+#   wherever the CA lives:
+iam-ra host approve web01 --role deploy --csr web01.csr --out web01.pem
+#   back on the host: install web01.pem and point Nix at it
+```
+
+Both the CSR and the signed certificate are public, so they need no confidential channel — paste
+them, commit them to your Nix config repo, or send them over email. Compare this with v2, which
+required transporting a *private key* to the host.
+
+What each verb checks before signing:
+
+- the CSR parses
+- its self-signature verifies, proving the requester holds the private key (proof of possession)
+- its key is one IAM Roles Anywhere can actually use — RSA ≥ 2048 or EC P-256/384/521; Ed25519,
+  Ed448 and DSA are refused because the credential helper cannot sign a CreateSession request with
+  them, so the certificate would be inert
+
+The two CA backends differ in how much of the CSR they trust, and it is worth knowing which you are
+on:
+
+| CA mode | Subject handling |
+|---|---|
+| self-signed | The subject is **rebuilt** from the hostname you approve. The CSR contributes only a public key, so a host cannot obtain a certificate naming a different host. |
+| ACM Private CA | PCA copies the subject from the CSR and the client-auth template does not allow an override, so `approve` instead **verifies** the CSR's CN matches and refuses on mismatch. |
+
 ## Migration path
 
 Re-enrolment. There is no in-place upgrade.

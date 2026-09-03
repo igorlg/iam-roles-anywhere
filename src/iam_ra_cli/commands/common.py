@@ -19,6 +19,10 @@ from iam_ra_cli.lib.errors import (
     CannotRemoveLastRoleError,
     CAScopeAlreadyExistsError,
     CAScopeNotFoundError,
+    CsrInvalidSignatureError,
+    CsrParseError,
+    CsrSubjectMismatchError,
+    CsrUnsupportedKeyError,
     HostAlreadyExistsError,
     HostNotFoundError,
     K8sClusterAlreadyExistsError,
@@ -27,6 +31,9 @@ from iam_ra_cli.lib.errors import (
     K8sUnsupportedCAModeError,
     K8sWorkloadAlreadyExistsError,
     K8sWorkloadNotFoundError,
+    KeyAlreadyExistsError,
+    KeyNotFoundError,
+    KeyStoreOperationError,
     NotInitializedError,
     PCADescribeError,
     PCAGetCertError,
@@ -229,6 +236,52 @@ def _format_error(error: Any) -> str:
 
         case CAKeyNotFoundError(expected_path):
             return f"CA private key not found at '{expected_path}'. Was 'iam-ra init' run on this machine?"
+
+        case CsrParseError(reason):
+            return f"Could not parse the certificate signing request: {reason}"
+
+        case CsrInvalidSignatureError():
+            return (
+                "The certificate signing request's signature does not verify "
+                "against its own public key. It was probably corrupted in "
+                "transit - re-copy it, or regenerate it with "
+                "'iam-ra host request'."
+            )
+
+        case CsrUnsupportedKeyError(key_type, reason):
+            return (
+                f"Refusing to certify a {key_type} key: {reason}. IAM Roles "
+                f"Anywhere signs its CreateSession request with the host key, "
+                f"so a certificate for an unusable key type would not work."
+            )
+
+        case CsrSubjectMismatchError(expected_common_name, requested_common_name):
+            return (
+                f"The request asks to be certified as "
+                f"'{requested_common_name}' but you are approving "
+                f"'{expected_common_name}'. ACM Private CA copies the subject "
+                f"from the request and cannot override it, so this must be "
+                f"refused. Check you have the right CSR, or re-run "
+                f"'iam-ra host request {expected_common_name}' on the host."
+            )
+
+        case KeyAlreadyExistsError(backend, label, location):
+            return (
+                f"A private key already exists for '{label}' in the {backend} "
+                f"key store ({location}). Overwriting it would strand the "
+                f"certificate already issued for it, which stays valid until "
+                f"it expires. Pass --overwrite if that is what you want."
+            )
+
+        case KeyNotFoundError(backend, label, location):
+            return (
+                f"No private key found for '{label}' in the {backend} key "
+                f"store ({location}). Run 'iam-ra host request' on this host "
+                f"first."
+            )
+
+        case KeyStoreOperationError(backend, operation, reason):
+            return f"Key store operation '{operation}' failed on the {backend} backend: {reason}"
 
         case CAScopeNotFoundError(namespace, scope):
             return f"CA scope '{scope}' not found in namespace '{namespace}'. Run 'iam-ra ca setup --scope {scope}' first."
