@@ -7,7 +7,7 @@
 
 In v2, host private keys are generated on the **admin workstation** and shipped to the host:
 
-```
+```text
 admin (keygen) -> S3 -> Fetcher Lambda -> CloudFormation -> Secrets Manager -> SOPS file -> host
 ```
 
@@ -27,7 +27,7 @@ This is not a change that can be made compatibly, so **v3 requires re-enrolling 
 | Key in S3 / Secrets Manager | yes | **no** |
 | Host CloudFormation stack | `iam-ra-<ns>-host-<host>` | **removed** |
 | SOPS file for cert/key | required | **not required** (cert is public, commit it in plain Nix) |
-| Host onboarding command | `iam-ra host onboard` | `iam-ra host enroll` (one-shot) or `host request` + `host approve` (split) |
+| Host onboarding command | `iam-ra host onboard` | `iam-ra host enroll` (one-shot) or `host request` + `host approve` + `host install` (split) |
 | `iam-ra host rotate-cert` | rotated the key from the admin box | **removed** — rotation is now a host-side re-enrol |
 | `iam-ra host add-role` / `remove-role` | updated state *and* rewrote the SOPS file | update state only; you edit Nix yourself |
 | State schema | v3 | v4 |
@@ -115,14 +115,33 @@ iam-ra host enroll mbp --role admin --role readonly
 iam-ra host request web01 --out web01.csr
 #   wherever the CA lives:
 iam-ra host approve web01 --role deploy --csr web01.csr --out web01.pem
-#   back on the host: install web01.pem and point Nix at it
+#   back on the host, again with no AWS credentials:
+iam-ra host install web01 --certificate web01.pem
 ```
 
 Both the CSR and the signed certificate are public, so they need no confidential channel — paste
 them, commit them to your Nix config repo, or send them over email. Compare this with v2, which
 required transporting a *private key* to the host.
 
-What each verb checks before signing:
+Four verbs rather than flags on one command, because their preconditions genuinely differ:
+
+| Verb | Runs where | Needs AWS | Touches the private key |
+|---|---|---|---|
+| `request` | on the host | no | creates it, in the key store |
+| `approve` | wherever the CA lives | yes | never sees it |
+| `install` | on the host | no | pairs a certificate with it |
+| `enroll` | on a host that has AWS access | yes | all three of the above, in one process |
+
+`request` and `install` take no AWS context *in their function signatures*, not merely by
+convention — a test asserts this, so a future refactor cannot quietly reintroduce a credential
+requirement on the host side.
+
+`install` refuses a certificate whose public key does not match the key the host is holding. That
+catches the two realistic mistakes: a certificate meant for a different host, and a certificate
+superseded by a later `request` that rotated the key. Both would otherwise produce a cert/key pair
+that fails at credential time with no useful diagnostic.
+
+What `approve` checks before signing:
 
 - the CSR parses
 - its self-signature verifies, proving the requester holds the private key (proof of possession)
@@ -142,7 +161,7 @@ on:
 
 ### `iam-ra host onboard`
 
-Replaced by `host enroll`, or `host request` + `host approve`. The only reason `onboard` could work
+Replaced by `host enroll`, or `host request` + `host approve` + `host install`. The only reason `onboard` could work
 was that the admin machine generated the host's private key, which is exactly what v3 removes.
 
 ### `iam-ra host rotate-cert`

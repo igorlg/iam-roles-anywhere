@@ -303,32 +303,10 @@ def delete_role(ctx: AwsContext, stack_name: str) -> Result[None, StackDeployErr
 
 ### `operations/host.py` - Host operations
 
+Teardown only, since v3. A v3 host has no CloudFormation stack and no S3
+artifacts, so this exists purely to clean up hosts enrolled under v2.
+
 ```python
-@dataclass(frozen=True)
-class HostResult:
-    stack_name: str
-    hostname: str
-    certificate_secret_arn: Arn
-    private_key_secret_arn: Arn
-
-def onboard_host_self_signed(
-    ctx: AwsContext,
-    namespace: str,
-    hostname: str,
-    bucket_name: str,
-    ca_cert_s3_key: str,
-    ca_key_path: Path,
-    validity_days: int = 365,
-) -> Result[HostResult, HostError]
-
-def onboard_host_pca(
-    ctx: AwsContext,
-    namespace: str,
-    hostname: str,
-    pca_arn: str,
-    validity_days: int = 365,
-) -> Result[HostResult, StackDeployError]
-
 def offboard_host(
     ctx: AwsContext,
     stack_name: str,
@@ -338,30 +316,51 @@ def offboard_host(
 ) -> Result[None, StackDeployError]
 ```
 
-### `operations/secrets.py` - SOPS secrets file generation
+### `operations/enrol.py` - CSR signing
+
+Replaces the v2 `onboard_host_*` operations. It signs, and does not deploy: the
+key already exists on the host, so there is nothing to provision.
 
 ```python
-@dataclass(frozen=True)
-class SecretsFileResult:
-    path: Path
-    encrypted: bool
-
-@dataclass(frozen=True)
-class SecretsError:
-    reason: str
-
-def create_secrets_file(
+def sign_host_csr(
     ctx: AwsContext,
+    csr_pem: str,
     hostname: str,
-    certificate_secret_arn: str,
-    private_key_secret_arn: str,
-    trust_anchor_arn: str,
-    profile_arn: str,
-    role_arn: str,
-    output_path: Path | None = None,
-    encrypt: bool = True,
-) -> Result[SecretsFileResult, SecretsError]
+    ca: CA,
+    bucket_name: str,
+    validity_days: int = 365,
+) -> Result[str, SignHostCsrError]
+    """Return a signed certificate PEM.
+
+    Dispatches on CA mode: signs locally for a self-signed CA, or submits the
+    CSR to ACM Private CA. Validates the CSR's self-signature and key type
+    first, and for the self-signed path rebuilds the subject from `hostname`
+    rather than trusting the CSR.
+    """
 ```
+
+### `lib/keystore.py` - where private keys live
+
+Not an AWS operation, but the other half of enrolment. A `KeyStore` generates a
+key and CSR, and later pairs a certificate with that key. The protocol exists so
+the key never has to be returned to the caller.
+
+```python
+class KeyStore(Protocol):
+    def generate(label, common_name, *, overwrite=False) -> Result[EnrolmentRequest, ...]
+    def install_certificate(label, pem) -> Result[CredentialSource, ...]
+    def locate(label) -> Result[CredentialSource, ...]
+    def delete(label) -> Result[None, ...]
+```
+
+Backends: `FileKeyStore` (all platforms) and `KeychainKeyStore` (macOS,
+non-extractable). `CredentialSource` is a tagged union — `FileCredentialSource`
+carries paths, `KeychainCredentialSource` carries a selector — matching the
+Nix module options, because `aws_signing_helper` treats `--cert-selector` as
+mutually exclusive with `--certificate`/`--private-key`.
+
+`operations/secrets.py` was **deleted in v3**. It generated the SOPS file that
+carried a host's private key; there is no longer a private key to carry.
 
 ---
 
@@ -452,32 +451,7 @@ def list_roles(
 ### `workflows/host.py`
 
 ```python
-@dataclass(frozen=True)
-class OnboardConfig:
-    namespace: str
-    hostname: str
-    role_name: str
-    validity_days: int = 365
-    create_sops: bool = True
-    sops_output_path: Path | None = None
-
-@dataclass(frozen=True) 
-class OnboardResult:
-    host: Host
-    secrets_file: SecretsFileResult | None
-
-type OnboardError = NotInitializedError | RoleNotFoundError | AlreadyExistsError | HostError | SecretsError
 type OffboardError = NotInitializedError | HostNotFoundError | StackDeployError
-
-def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, OnboardError]:
-    """
-    1. Load state, validate initialized
-    2. Validate role exists
-    3. Generate cert (self-signed or PCA based on CA mode)
-    4. Deploy host stack
-    5. Create SOPS file (if requested)
-    6. Update state
-    """
 
 def offboard(
     ctx: AwsContext,
@@ -497,6 +471,67 @@ def list_hosts(
 ) -> Result[dict[str, Host], NotInitializedError]:
     """Load state, return hosts dict."""
 ```
+
+`add_role` / `remove_role` also live here. Since v3 they update the recorded role
+list only and no longer rewrite a SOPS file — a certificate carries no role
+information, so granting a role is a change to the IAM trust policy and the
+host's Nix profiles, not to its certificate.
+
+### `workflows/enrol.py`
+
+The v3 replacement for `host onboard`. Four verbs rather than flags on one
+command, because their preconditions genuinely differ — and note which ones take
+an `AwsContext`. The host-side verbs do not, so the *signature itself* guarantees
+a host needs no AWS credentials. Tests assert this, so a refactor cannot quietly
+reintroduce the dependency.
+
+```python
+type RequestError = KeyStoreError
+type InstallError = KeyStoreError | CsrParseError
+type ApproveError = (
+    NotInitializedError | AccountMismatchError | RoleNotFoundError
+    | CAScopeNotFoundError | HostAlreadyExistsError | SignHostCsrError
+    | StateLoadError | StateSaveError
+)
+type EnrolError = ApproveError | KeyStoreError
+
+# --- on the host, no AWS ---
+
+def request_certificate(config: RequestConfig) -> Result[RequestResult, RequestError]:
+    """Generate a key in the host's key store, return a CSR for it.
+
+    Note the absent `ctx`. Returns no private key, by design.
+    """
+
+def install_certificate(config: InstallConfig) -> Result[InstallResult, InstallError]:
+    """Pair a signed certificate with the key already in the store.
+
+    Refuses a certificate whose public key does not match the stored key, which
+    catches both a certificate meant for another host and one superseded by a
+    later `request`.
+    """
+
+# --- where the CA lives ---
+
+def approve_certificate(
+    ctx: AwsContext, config: ApproveConfig
+) -> Result[ApproveResult, ApproveError]:
+    """Validate and sign a CSR, then record the host in state.
+
+    1. Load state, validate initialized, check account matches namespace
+    2. Resolve roles -> scope -> CA
+    3. Sign via operations.sign_host_csr (validates the CSR first)
+    4. Record the host: key_store, certificate_serial, not_after
+    """
+
+# --- both halves, one process ---
+
+def enrol_host(ctx: AwsContext, config: EnrolConfig) -> Result[EnrolResult, EnrolError]:
+    """request -> approve -> install, for a host that has AWS access."""
+```
+
+`enrol_host` calls the other three rather than reimplementing them, which keeps
+the split and combined flows on one code path.
 
 ### `workflows/status.py`
 
@@ -623,33 +658,61 @@ def list_cmd(namespace, region, profile):
 def host():
     """Manage hosts."""
 
-@host.command("onboard")
+# Host-side. Note there is no AwsContext to build - `request` cannot make an
+# AWS call even by accident.
+@host.command("request")
 @click.argument("hostname")
-@click.option("--role", "-R", required=True)
 @click.option("--namespace", "-n", default="default")
-@click.option("--region", "-r", default="ap-southeast-2")
-@click.option("--profile", "-p", default=None)
+@click.option("--scope", "-s", default="default")
+@click.option("--key-store", type=click.Choice(["files", "macosKeychain"]), default="files")
+@click.option("--out", type=click.Path())
+@click.option("--overwrite", is_flag=True)
+def request(hostname, namespace, scope, key_store, out, overwrite):
+    result = handle_result(request_certificate(RequestConfig(
+        namespace=namespace, hostname=hostname, scope=scope,
+        key_store=key_store, overwrite=overwrite,
+    )))
+    # CSR to stdout, human output to stderr, so the flow pipes.
+    _write_or_echo(result.csr_pem, out, label="CSR")
+
+# Host-side, and likewise context-free.
+@host.command("install")
+@click.argument("hostname")
+@click.option("--certificate", "-c", required=True)
+# ... namespace / scope / key-store, which must match `request` ...
+def install(hostname, certificate, namespace, scope, key_store):
+    result = handle_result(install_certificate(InstallConfig(
+        namespace=namespace, certificate_pem=_read_pem(certificate),
+        scope=scope, key_store=key_store,
+    )))
+    for line in _render_certificate_stanza(result.credential_source):
+        click.echo(line, err=True)
+
+# CA-side. This one needs credentials.
+@host.command("approve")
+@click.argument("hostname")
+@click.option("--role", "-R", required=True, multiple=True)
+@click.option("--csr", required=True)      # path, or '-' for stdin
 @click.option("--validity-days", default=365)
-@click.option("--skip-sops", is_flag=True)
-@click.option("--output", "-o", type=click.Path())
-def onboard(hostname, role, namespace, region, profile, validity_days, skip_sops, output):
-    ctx = AwsContext(region=region, profile=profile)
-    config = OnboardConfig(
-        namespace=namespace,
-        hostname=hostname,
-        role_name=role,
-        validity_days=validity_days,
-        create_sops=not skip_sops,
-        sops_output_path=Path(output) if output else None,
-    )
-    
-    match workflows.host.onboard(ctx, config):
-        case Ok(result):
-            click.secho(f"Host '{hostname}' onboarded!", fg="green")
-            _print_next_steps(result)
-        case Err(e):
-            _print_error(e)
-            raise SystemExit(1)
+@click.option("--out", type=click.Path())
+@click.option("--overwrite", is_flag=True)
+# ... common AWS options ...
+def approve(hostname, role, csr, validity_days, out, overwrite, namespace, region, profile):
+    ctx = make_context(region=region, profile=profile)
+    result = handle_result(approve_certificate(ctx, ApproveConfig(
+        namespace=namespace, hostname=hostname, role_names=_split_roles(role),
+        csr_pem=_read_pem(csr), validity_days=validity_days, overwrite=overwrite,
+    )))
+    _write_or_echo(result.certificate_pem, out, label="Certificate")
+    _print_nix_snippet(result)
+
+# Both halves, for a host that has AWS access.
+@host.command("enroll")
+# ... same options as approve, plus --key-store ...
+def enroll(...):
+    ctx = make_context(region=region, profile=profile)
+    result = handle_result(enrol_host(ctx, EnrolConfig(...)))
+    _print_nix_snippet(result)
 
 @host.command("offboard")
 @click.argument("hostname")
@@ -729,7 +792,8 @@ iam_ra_cli/
 │   ├── result.py              # Result[T, E], Ok, Err
 │   ├── errors.py              # Error types
 │   ├── cfn.py                 # CloudFormation helpers
-│   ├── crypto.py              # Certificate generation
+│   ├── crypto.py              # CSR + certificate signing
+│   ├── keystore.py            # files + macosKeychain key stores
 │   ├── paths.py               # XDG paths
 │   ├── state.py               # State load/save
 │   ├── templates.py           # Template loading
@@ -742,13 +806,14 @@ iam_ra_cli/
 │   ├── ca.py                  # CA stack operations
 │   ├── role.py                # Role stack operations
 │   ├── host.py                # Host stack operations
-│   └── secrets.py             # SOPS file operations
+│   └── enrol.py               # CSR signing (self-signed or PCA)
 ├── workflows/
 │   ├── __init__.py
 │   ├── init.py                # Init workflow
 │   ├── destroy.py             # Destroy workflow
 │   ├── role.py                # Role workflows
-│   ├── host.py                # Host workflows
+│   ├── host.py                # Host lifecycle (offboard, list, add/remove-role)
+│   ├── enrol.py               # request / install / approve / enrol
 │   └── status.py              # Status workflow
 ├── commands/
 │   ├── __init__.py
@@ -756,7 +821,7 @@ iam_ra_cli/
 │   ├── init.py                # iam-ra init
 │   ├── destroy.py             # iam-ra destroy
 │   ├── role.py                # iam-ra role {create,delete,list}
-│   ├── host.py                # iam-ra host {onboard,offboard,list}
+│   ├── host.py                # iam-ra host {request,approve,install,enroll,...}
 │   └── status.py              # iam-ra status
 └── data/
     └── cloudformation/
@@ -764,9 +829,10 @@ iam_ra_cli/
         ├── rootca-self-signed.yaml
         ├── rootca-pca-new.yaml
         ├── rootca-pca-existing.yaml
-        ├── role.yaml
-        └── host.yaml
+        └── role.yaml
 ```
+
+No `host.yaml`: v3 hosts have no CloudFormation stack.
 
 ---
 
@@ -782,7 +848,12 @@ iam-ra
 │   ├── delete <name>          # Delete role
 │   └── list                   # List roles
 └── host
-    ├── onboard <hostname>     # Onboard host
+    ├── request <hostname>     # On the host: generate key, emit CSR (no AWS)
+    ├── approve <hostname>     # At the CA: sign the CSR, record the host
+    ├── install <hostname>     # On the host: pair the certificate (no AWS)
+    ├── enroll <hostname>      # All three, for a host with AWS access
+    ├── add-role <host> <role>    # Record an extra role
+    ├── remove-role <host> <role> # Record a removed role
     ├── offboard <hostname>    # Offboard host
     └── list                   # List hosts
 ```
@@ -830,5 +901,12 @@ match workflows.init.init(ctx, config):
 ## Open Questions
 
 1. **Refresh command?** - Rebuild state from actual CloudFormation stacks if out of sync
-2. **Rotate command?** - Regenerate host certificates without full offboard/onboard
+2. ~~**Rotate command?**~~ - Resolved. v3 rotation is
+   `iam-ra host enroll --overwrite` (or `request` + `approve` + `install`), run on
+   the host. The v2 `rotate-cert` was removed rather than ported: it rotated the
+   key from the admin workstation, which is impossible once the key never leaves
+   the host.
 3. **Export command?** - Export credentials in different formats (JSON, env vars, etc.)
+4. **CRL generation and import?** - IAM Roles Anywhere supports revocation via
+   `ImportCrl`, but this tool neither generates nor imports a CRL, so offboarding
+   does not invalidate a certificate. See [SECURITY.md](../SECURITY.md).
