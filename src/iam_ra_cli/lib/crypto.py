@@ -48,18 +48,6 @@ class KeyPair:
 
 
 @dataclass(frozen=True)
-class HostKeyAndCsr:
-    """Host private key and CSR (Certificate Signing Request).
-
-    Used when the host certificate must be signed by an external CA
-    (e.g., ACM Private CA via IssueCertificate API) rather than locally.
-    """
-
-    private_key_pem: str
-    csr_pem: str
-
-
-@dataclass(frozen=True)
 class CertificateInfo:
     """Public facts about an issued certificate, for recording in state."""
 
@@ -390,71 +378,3 @@ def sign_csr(
     )
 
     return Ok(cert.public_bytes(serialization.Encoding.PEM).decode())
-
-
-def generate_host_cert(
-    hostname: str,
-    ca_cert_pem: str,
-    ca_key_pem: str,
-    validity_days: int = 365,
-) -> KeyPair:
-    """Generate a host keypair and a certificate for it, signed by the CA.
-
-    Both the key and the certificate are produced on whichever machine calls
-    this, which makes it the **v2 flow**. It is retained while the v3 host-side
-    enrolment commands are built out, and is scheduled for removal once
-    ``host request`` / ``host approve`` replace it. Prefer generating the key in
-    a :mod:`~iam_ra_cli.lib.keystore` backend on the host and calling
-    :func:`sign_csr`.
-
-    Implemented on top of :func:`sign_csr` so there is exactly one
-    certificate-issuing code path.
-
-    Args:
-        hostname: Host identifier (becomes certificate CN)
-        ca_cert_pem: CA certificate in PEM format
-        ca_key_pem: CA private key in PEM format
-        validity_days: How long the host cert is valid
-
-    Returns:
-        KeyPair with PEM-encoded certificate and private key
-    """
-    private_key = generate_private_key()
-    csr_pem = build_csr(private_key, hostname)
-
-    match sign_csr(
-        csr_pem=csr_pem,
-        ca_cert_pem=ca_cert_pem,
-        ca_key_pem=ca_key_pem,
-        common_name=hostname,
-        validity_days=validity_days,
-    ):
-        case Err(e):
-            # Unreachable: the CSR was just built here from a fresh P-256 key,
-            # so it parses, self-verifies, and uses an allowed curve.
-            raise AssertionError(f"self-generated CSR was rejected: {e}")
-        case Ok(cert_pem):
-            return KeyPair(
-                certificate=cert_pem,
-                private_key=serialize_private_key(private_key),
-            )
-
-
-def generate_host_keypair_and_csr(hostname: str) -> HostKeyAndCsr:
-    """Generate a host private key and CSR for signing by an external CA.
-
-    Use this when the host certificate will be signed by ACM Private CA
-    (not locally). The resulting CSR is submitted to PCA's IssueCertificate
-    API; the returned private key stays with the caller.
-
-    Args:
-        hostname: Host identifier (becomes CSR CN)
-
-    Returns:
-        HostKeyAndCsr with PEM-encoded private key and CSR.
-    """
-    private_key = generate_private_key()
-    return HostKeyAndCsr(
-        private_key_pem=serialize_private_key(private_key),
-        csr_pem=build_csr(private_key, hostname),
-    )

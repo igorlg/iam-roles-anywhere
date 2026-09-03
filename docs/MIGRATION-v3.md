@@ -28,6 +28,8 @@ This is not a change that can be made compatibly, so **v3 requires re-enrolling 
 | Host CloudFormation stack | `iam-ra-<ns>-host-<host>` | **removed** |
 | SOPS file for cert/key | required | **not required** (cert is public, commit it in plain Nix) |
 | Host onboarding command | `iam-ra host onboard` | `iam-ra host enroll` (one-shot) or `host request` + `host approve` (split) |
+| `iam-ra host rotate-cert` | rotated the key from the admin box | **removed** — rotation is now a host-side re-enrol |
+| `iam-ra host add-role` / `remove-role` | updated state *and* rewrote the SOPS file | update state only; you edit Nix yourself |
 | State schema | v3 | v4 |
 | Nix `certificate` options | `certPath` + `keyPath` | tagged union with `source = "files" \| "macosKeychain" \| ...` |
 | Nix lib credential helpers | `certificatePath` + `privateKeyPath` args | single `certificate` arg (the tagged union) |
@@ -135,6 +137,43 @@ on:
 |---|---|
 | self-signed | The subject is **rebuilt** from the hostname you approve. The CSR contributes only a public key, so a host cannot obtain a certificate naming a different host. |
 | ACM Private CA | PCA copies the subject from the CSR and the client-auth template does not allow an override, so `approve` instead **verifies** the CSR's CN matches and refuses on mismatch. |
+
+## Removed commands
+
+### `iam-ra host onboard`
+
+Replaced by `host enroll`, or `host request` + `host approve`. The only reason `onboard` could work
+was that the admin machine generated the host's private key, which is exactly what v3 removes.
+
+### `iam-ra host rotate-cert`
+
+Removed with no direct replacement, because it rotated a host's key **from the admin workstation** —
+possible only while the admin holds that key. Under v3 the key lives on the host and never leaves,
+so rotation is necessarily a host-side action:
+
+```bash
+# on the host, one machine:
+iam-ra host enroll <hostname> --role <role> --overwrite
+
+# split:
+iam-ra host request <hostname> --overwrite --out new.csr
+iam-ra host approve <hostname> --role <role> --csr new.csr --overwrite --out new.pem
+```
+
+Note the old certificate remains valid until it expires — there is no revocation in either version.
+
+### `iam-ra host add-role` / `remove-role` behaviour changed
+
+They no longer rewrite a SOPS file, because there isn't one. A certificate carries no role
+information: it identifies the host, and which roles that host may assume is decided by the IAM role
+trust policies plus the `profiles.<name>` entries in the host's Nix configuration.
+
+So these commands now update the *recorded* role list and print the ARNs to paste into Nix.
+`--sops-output` is gone from both.
+
+**This means `remove-role` alone does not revoke access.** Until you remove the matching
+`profiles.<name>` entry from Nix and rebuild, the host can still assume the role. The command warns
+about this.
 
 ## Migration path
 

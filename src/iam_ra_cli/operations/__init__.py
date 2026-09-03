@@ -6,14 +6,10 @@ from iam_ra_cli.operations.ca import (
     create_self_signed_ca,
     delete_ca,
 )
-from iam_ra_cli.operations.host import (
-    offboard_host,
-    onboard_host_pca,
-    onboard_host_self_signed,
-)
+from iam_ra_cli.operations.enrol import sign_host_csr
+from iam_ra_cli.operations.host import offboard_host
 from iam_ra_cli.operations.infra import delete_init, deploy_init
 from iam_ra_cli.operations.role import create_role, delete_role
-from iam_ra_cli.operations.secrets import create_secrets_file
 
 __all__ = [
     # infra
@@ -27,10 +23,8 @@ __all__ = [
     # role
     "create_role",
     "delete_role",
-    # host
-    "onboard_host_self_signed",
-    "onboard_host_pca",
+    # enrolment
+    "sign_host_csr",
+    # host teardown (legacy v2/v3 hosts only)
     "offboard_host",
-    # secrets
-    "create_secrets_file",
 ]
