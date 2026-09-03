@@ -4,7 +4,8 @@
 #
 # Layers:
 #   1. Global: at least one identity; unique awsProfileName; at most one makeDefault
-#   2. Per-identity: valid trustAnchorArn; at least one profile
+#   2. Per-identity: valid trustAnchorArn; at least one profile; certificate
+#      source completeness, mutual exclusion, and platform support
 #   3. Per-profile: valid profileArn and roleArn
 #
 # Negative tests in checks.nix exercise the global assertions by
@@ -14,9 +15,75 @@
   lib,
   cfg,
   iamRaLib,
+  isDarwin,
 }:
 
 let
+  # ---------- Per-identity certificate source ----------
+
+  # The certificate option is a tagged union (see module-options.nix).
+  # Nix's module system cannot express "these fields are required only
+  # for this tag", so completeness and mutual exclusion are enforced
+  # here instead of in the type.
+  certificateAssertions =
+    identityName: identityCfg:
+    let
+      cert = identityCfg.certificate;
+      inherit (cert) source;
+      opt = "programs.iamRolesAnywhere.identities.${identityName}.certificate";
+      selectorSet =
+        cert.selector.subject != null || cert.selector.issuer != null || cert.selector.serial != null;
+      pathsSet = cert.certPath != null || cert.keyPath != null;
+    in
+    lib.optionals (source == "files") [
+      {
+        assertion = cert.certPath != null;
+        message = "${opt}.certPath is required when ${opt}.source = \"files\"";
+      }
+      {
+        assertion = cert.keyPath != null;
+        message = "${opt}.keyPath is required when ${opt}.source = \"files\"";
+      }
+      {
+        assertion = !selectorSet;
+        message =
+          "${opt}.selector is set but ${opt}.source = \"files\", so it would be silently "
+          + "ignored. Set source = \"macosKeychain\" to use the selector, or remove it.";
+      }
+    ]
+    ++ lib.optionals (source == "macosKeychain") [
+      {
+        # Without this the selector matches every identity in the
+        # keychain, and the helper fails on an ambiguous match.
+        assertion = selectorSet;
+        message =
+          "${opt}.source = \"macosKeychain\" requires at least one of "
+          + "${opt}.selector.{subject,issuer,serial}";
+      }
+      {
+        # aws_signing_helper marks --cert-selector mutually exclusive
+        # with both --certificate and --private-key, so a config setting
+        # both would fail at runtime with an argument-parse error.
+        assertion = !pathsSet;
+        message =
+          "${opt}.certPath/keyPath cannot be combined with source = \"macosKeychain\". "
+          + "aws_signing_helper treats --cert-selector as mutually exclusive with "
+          + "--certificate and --private-key. Remove the paths.";
+      }
+      {
+        # The credential helper's certificate-store support is a stub
+        # returning "unable to use cert store signer on linux", so this
+        # would build fine and then fail at every credential fetch.
+        # Fail at eval time instead.
+        assertion = isDarwin;
+        message =
+          "${opt}.source = \"macosKeychain\" is only supported on Darwin. "
+          + "aws_signing_helper has no certificate-store implementation on Linux - it "
+          + "returns \"unable to use cert store signer on linux\" at runtime. Use "
+          + "source = \"files\" instead.";
+      }
+    ];
+
   # ---------- Per-profile (within a single identity) ----------
 
   profileAssertions = identityName: profileName: profileCfg: [
@@ -44,6 +111,7 @@ let
         message = "programs.iamRolesAnywhere.identities.${identityName}: at least one profile must be defined under 'profiles'";
       }
     ]
+    ++ certificateAssertions identityName identityCfg
     ++ lib.flatten (
       lib.mapAttrsToList (
         profileName: profileCfg: profileAssertions identityName profileName profileCfg

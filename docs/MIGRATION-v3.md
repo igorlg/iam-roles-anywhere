@@ -30,7 +30,49 @@ This is not a change that can be made compatibly, so **v3 requires re-enrolling 
 | Host onboarding command | `iam-ra host onboard` | `iam-ra host enroll` (one-shot) or `host request` + `host approve` (split) |
 | State schema | v3 | v4 |
 | Nix `certificate` options | `certPath` + `keyPath` | tagged union with `source = "files" \| "macosKeychain" \| ...` |
+| Nix lib credential helpers | `certificatePath` + `privateKeyPath` args | single `certificate` arg (the tagged union) |
 | Role trust policy | trust anchor only | optional per-host CN condition |
+
+## Nix module: certificate options
+
+`certificate.source` was added, defaulting to `"files"`. **Existing configurations that set
+`certPath` and `keyPath` continue to work unchanged** — all the shipped examples still evaluate.
+
+`certPath` and `keyPath` are now nullable and required only when `source = "files"`. New assertions
+reject incoherent combinations, so configs that would have failed at runtime now fail at eval:
+
+- `source = "files"` without `certPath`/`keyPath`
+- `source = "files"` with a `selector` set (it would otherwise be silently ignored)
+- `source = "macosKeychain"` with no selector field set (would match every keychain identity)
+- `source = "macosKeychain"` combined with `certPath`/`keyPath` — `aws_signing_helper` treats
+  `--cert-selector` as mutually exclusive with `--certificate` and `--private-key`
+- `source = "macosKeychain"` on a non-Darwin system — the credential helper's certificate-store
+  support is a stub that returns an error at runtime on Linux
+
+### Breaking: `iam-ra.lib` credential-process helpers
+
+If you call these directly (most users do not — the module does it for you), the certificate
+arguments moved into a single `certificate` attrset:
+
+```nix
+# v2
+iam-ra.lib.mkCredentialProcessCommand {
+  certificatePath = "/path/cert.pem";
+  privateKeyPath  = "/path/key.pem";
+  # ...
+}
+
+# v3
+iam-ra.lib.mkCredentialProcessCommand {
+  certificate = { source = "files"; certPath = "/path/cert.pem"; keyPath = "/path/key.pem"; };
+  # ...
+}
+```
+
+The inline `credential_process` command now passes every argument through `lib.escapeShellArg`.
+This fixes a latent bug: a certificate path containing a space previously produced a broken command
+in the inline form, while the wrapper-script form quoted correctly. Plain paths and ARNs are
+unaffected, since `escapeShellArg` leaves metacharacter-free tokens alone.
 
 ## Migration path
 

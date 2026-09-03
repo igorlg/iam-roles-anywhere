@@ -38,10 +38,13 @@ let
       identityCfg.sessionDuration;
 
   # Bundle the args every credential-process variant needs.
+  #
+  # `certificate` is forwarded as the whole tagged union rather than
+  # unpacked into cert/key paths, because the argument set depends on
+  # certificate.source - see mkCertificateSourceArgs in lib.nix.
   credProcessArgs = identityCfg: profileCfg: {
     inherit signingHelperPath;
-    certificatePath = toString identityCfg.certificate.certPath;
-    privateKeyPath = toString identityCfg.certificate.keyPath;
+    certificate = identityCfg.certificate;
     trustAnchorArn = identityCfg.trustAnchorArn;
     profileArn = profileCfg.profileArn;
     roleArn = profileCfg.roleArn;

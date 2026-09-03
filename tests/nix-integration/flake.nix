@@ -95,8 +95,11 @@
           let
             cmd = iam-ra.lib.mkCredentialProcessCommand {
               signingHelperPath = "/nix/store/fake/aws_signing_helper";
-              certificatePath = "/path/to/cert.pem";
-              privateKeyPath = "/path/to/key.pem";
+              certificate = {
+                source = "files";
+                certPath = "/path/to/cert.pem";
+                keyPath = "/path/to/key.pem";
+              };
               trustAnchorArn = testArns.trustAnchor;
               profileArn = testArns.profile;
               roleArn = testArns.role;

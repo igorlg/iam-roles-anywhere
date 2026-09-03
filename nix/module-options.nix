@@ -101,33 +101,127 @@ let
     {
       options = {
         # ===================
-        # CERTIFICATE PATHS
+        # CERTIFICATE SOURCE
         # ===================
-        # The certificate identifies the host within this identity.
-        # Shared across all profiles in this identity.
-        # This module is secrets-manager agnostic - paths can come from:
+        # A tagged union. `source` selects the variant; only that
+        # variant's fields are read.
+        #
+        # This is a union rather than a set of optional flags because
+        # aws_signing_helper treats --cert-selector as mutually
+        # exclusive with both --certificate and --private-key, so the
+        # argument sets are genuinely disjoint.
+        #
+        # For source = "files" the module stays secrets-manager
+        # agnostic - paths can come from:
         #   - SOPS: config.sops.secrets."iam-ra/<identity>/cert".path
         #   - agenix: config.age.secrets.iam-ra-<identity>-cert.path
         #   - Static files: "/etc/ssl/iam-ra/<identity>/cert.pem"
+        #   - iam-ra host enroll (v3): a host-generated key under
+        #     $XDG_STATE_HOME/iam-ra/keys/<label>/
         certificate = {
+          source = lib.mkOption {
+            type = lib.types.enum [
+              "files"
+              "macosKeychain"
+            ];
+            default = "files";
+            description = ''
+              Where the identity's certificate and private key live.
+
+              `files` (default)
+                Read both from the filesystem. Set `certPath` and
+                `keyPath`. The key is readable by anyone who can read
+                the file.
+
+              `macosKeychain`
+                Use an identity already imported into a macOS keychain,
+                selected with `selector`. The private key never leaves
+                the keychain and can be marked non-extractable, so it
+                cannot be copied off the host even by a process running
+                as the owning user. Darwin only - the credential
+                helper's certificate-store support is a hard error on
+                Linux, so the module refuses to evaluate elsewhere.
+                Requires the keychain to be unlocked and on the search
+                list (`security list-keychains`).
+            '';
+            example = "macosKeychain";
+          };
+
           certPath = lib.mkOption {
-            type = lib.types.either lib.types.path lib.types.str;
+            type = lib.types.nullOr (lib.types.either lib.types.path lib.types.str);
+            default = null;
             description = ''
               Path to the X.509 certificate file (PEM format).
+              Required when `source = "files"`, ignored otherwise.
+
               This certificate identifies the host within this identity
               and is shared across all profiles in this identity.
+
+              The certificate is not secret - it is presented in TLS
+              handshakes - so it does not need a secrets manager and may
+              be committed to your Nix configuration as a plain path.
             '';
             example = "/run/secrets/iam-ra/work/cert.pem";
           };
 
           keyPath = lib.mkOption {
-            type = lib.types.either lib.types.path lib.types.str;
+            type = lib.types.nullOr (lib.types.either lib.types.path lib.types.str);
+            default = null;
             description = ''
               Path to the private key file (PEM format).
+              Required when `source = "files"`, ignored otherwise.
+
               This key corresponds to the certificate and is shared
               across all profiles in this identity.
+
+              Note this must be a real, re-readable file. The credential
+              helper re-opens the key on every operation, so a FIFO,
+              process substitution or /dev/stdin will fail after the
+              first read.
             '';
             example = "/run/secrets/iam-ra/work/key.pem";
+          };
+
+          selector = {
+            subject = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = ''
+                Certificate subject to match in the keychain
+                (`x509Subject`). Used when `source = "macosKeychain"`.
+
+                Matching is exact, against the full distinguished name.
+                A value of "CN=web01" therefore matches only a subject
+                consisting of exactly that one RDN. At least one of
+                `subject`, `issuer` or `serial` must be set.
+              '';
+              example = "CN=web01";
+            };
+
+            issuer = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = ''
+                Certificate issuer to match in the keychain
+                (`x509Issuer`). Same exact full-DN matching as
+                `subject`.
+              '';
+              example = "CN=IAM Roles Anywhere CA";
+            };
+
+            serial = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = ''
+                Certificate serial number to match in the keychain
+                (`x509Serial`), interpreted as base 16.
+
+                Pins one exact certificate, so it must be updated on
+                every rotation - prefer `subject` unless you
+                specifically need to disambiguate.
+              '';
+              example = "15D19632234BF759A32802C0DA88F9E8AFC8702D";
+            };
           };
         };
 

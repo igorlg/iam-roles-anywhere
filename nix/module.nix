@@ -65,7 +65,10 @@ let
           ;
         inherit (iamRaLib) mkCredentialProcessCommand mkCredentialProcessScript;
       };
-      validationConfig = import ./module-validation.nix { inherit lib cfg iamRaLib; };
+      validationConfig = import ./module-validation.nix {
+        inherit lib cfg iamRaLib;
+        inherit (pkgs.stdenv) isDarwin;
+      };
     in
     {
       options.programs.iamRolesAnywhere = optionDefs;

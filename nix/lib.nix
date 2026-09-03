@@ -6,6 +6,77 @@
 
 rec {
   # ===================
+  # CERTIFICATE SOURCES
+  # ===================
+
+  # Supported certificate sources. Each names a different way of telling
+  # aws_signing_helper where the identity lives.
+  #
+  #   files          --certificate <path> --private-key <path>
+  #   macosKeychain  --cert-selector <selector>   (Darwin only)
+  #
+  # These are NOT combinable. aws_signing_helper declares
+  # MarkFlagsMutuallyExclusive on ("certificate", "cert-selector") and on
+  # ("private-key", "cert-selector"), so passing a path alongside a selector
+  # is rejected at argument-parse time. That exclusivity is why a certificate
+  # is modelled as a tagged union and why mkCertificateSourceArgs *dispatches*
+  # on the tag rather than appending optional arguments.
+  certificateSourceNames = [
+    "files"
+    "macosKeychain"
+  ];
+
+  # Render the value for --cert-selector.
+  #
+  # Format is one or more `Key=<key>,Value=<value>` pairs, space separated,
+  # forming a SINGLE argument. Only three keys exist in the helper's
+  # validCertSelectorKeys: x509Subject, x509Issuer, x509Serial. Matching is
+  # exact full-DN string equality against Go's cert.Subject.String(), so a
+  # bare "CN=foo" only matches a DN with exactly one RDN. Serial is base-16.
+  mkCertSelectorValue =
+    selector:
+    let
+      get = field: selector.${field} or null;
+      pairs =
+        lib.optional (get "subject" != null) "Key=x509Subject,Value=${selector.subject}"
+        ++ lib.optional (get "issuer" != null) "Key=x509Issuer,Value=${selector.issuer}"
+        ++ lib.optional (get "serial" != null) "Key=x509Serial,Value=${selector.serial}";
+    in
+    if pairs == [ ] then
+      throw (
+        "programs.iamRolesAnywhere: certificate.source = \"macosKeychain\" requires at least "
+        + "one of certificate.selector.{subject,issuer,serial} to be set, otherwise the "
+        + "selector would match every identity in the keychain."
+      )
+    else
+      lib.concatStringsSep " " pairs;
+
+  # Arguments identifying the certificate and key, dispatched on source.
+  # Returns a disjoint argument set per source - never a union of both.
+  mkCertificateSourceArgs =
+    certificate:
+    let
+      source = certificate.source or "files";
+    in
+    if source == "files" then
+      [
+        "--certificate"
+        (toString certificate.certPath)
+        "--private-key"
+        (toString certificate.keyPath)
+      ]
+    else if source == "macosKeychain" then
+      [
+        "--cert-selector"
+        (mkCertSelectorValue (certificate.selector or { }))
+      ]
+    else
+      throw (
+        "programs.iamRolesAnywhere: unknown certificate.source \"${toString source}\"; "
+        + "expected one of ${lib.concatStringsSep ", " certificateSourceNames}"
+      );
+
+  # ===================
   # CREDENTIAL PROCESS
   # ===================
 
@@ -14,10 +85,13 @@ rec {
   # both the inline command (mkCredentialProcessCommand) and the
   # wrapper-script variant (mkCredentialProcessScript) share one
   # source of truth for the argument order / conditional args.
+  #
+  # `certificate` is the tagged union described above:
+  #   { source = "files"; certPath = ...; keyPath = ...; }
+  #   { source = "macosKeychain"; selector = { subject = ...; ... }; }
   mkCredentialProcessArgs =
     {
-      certificatePath,
-      privateKeyPath,
+      certificate,
       trustAnchorArn,
       profileArn,
       roleArn,
@@ -27,10 +101,9 @@ rec {
     let
       baseArgs = [
         "credential-process"
-        "--certificate"
-        certificatePath
-        "--private-key"
-        privateKeyPath
+      ]
+      ++ mkCertificateSourceArgs certificate
+      ++ [
         "--trust-anchor-arn"
         trustAnchorArn
         "--profile-arn"
@@ -51,11 +124,20 @@ rec {
 
   # Generate the aws_signing_helper credential-process command.
   # This command is used in ~/.aws/config to obtain temporary credentials.
+  #
+  # Every token is passed through lib.escapeShellArg. credential_process is
+  # not run through a shell, but consumers split the string with POSIX
+  # shell-word rules (botocore uses shlex.split via compat_shell_split), so
+  # single-quoting is both understood and necessary: a --cert-selector value
+  # contains spaces, and certificate paths may too. Without quoting such a
+  # value would silently split into several arguments.
+  #
+  # escapeShellArg is a no-op for tokens of only [alnum,._+:@%/-], so plain
+  # paths and ARNs come out unchanged and unquoted.
   mkCredentialProcessCommand =
     {
       signingHelperPath, # Path to aws_signing_helper binary
-      certificatePath, # Path to X.509 certificate
-      privateKeyPath, # Path to private key
+      certificate, # Tagged certificate source (see mkCertificateSourceArgs)
       trustAnchorArn, # IAM Roles Anywhere trust anchor ARN
       profileArn, # IAM Roles Anywhere profile ARN
       roleArn, # IAM role ARN to assume
@@ -65,8 +147,7 @@ rec {
     let
       args = mkCredentialProcessArgs {
         inherit
-          certificatePath
-          privateKeyPath
+          certificate
           trustAnchorArn
           profileArn
           roleArn
@@ -75,7 +156,7 @@ rec {
           ;
       };
     in
-    lib.concatStringsSep " " ([ signingHelperPath ] ++ args);
+    lib.concatStringsSep " " (map lib.escapeShellArg ([ signingHelperPath ] ++ args));
 
   # Generate a standalone shell script that invokes aws_signing_helper
   # credential-process. Emitted when useCredentialProcessWrapper is
@@ -93,8 +174,7 @@ rec {
   mkCredentialProcessScript =
     {
       signingHelperPath,
-      certificatePath,
-      privateKeyPath,
+      certificate,
       trustAnchorArn,
       profileArn,
       roleArn,
@@ -104,8 +184,7 @@ rec {
     let
       args = mkCredentialProcessArgs {
         inherit
-          certificatePath
-          privateKeyPath
+          certificate
           trustAnchorArn
           profileArn
           roleArn

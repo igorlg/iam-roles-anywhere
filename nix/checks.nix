@@ -157,8 +157,11 @@ let
       let
         cmd = self.lib.mkCredentialProcessCommand {
           signingHelperPath = "/nix/store/fake/bin/aws_signing_helper";
-          certificatePath = "/run/secrets/cert.pem";
-          privateKeyPath = "/run/secrets/key.pem";
+          certificate = {
+            source = "files";
+            certPath = "/run/secrets/cert.pem";
+            keyPath = "/run/secrets/key.pem";
+          };
           trustAnchorArn = testArns.trustAnchor;
           profileArn = testArns.profile;
           roleArn = testArns.role;
@@ -168,8 +171,12 @@ let
         hasCert = builtins.match ".*--certificate.*/run/secrets/cert.pem.*" cmd != null;
         hasKey = builtins.match ".*--private-key.*/run/secrets/key.pem.*" cmd != null;
         hasTrustAnchor = builtins.match ".*--trust-anchor-arn.*" cmd != null;
+        # Plain paths and ARNs contain no shell metacharacters, so
+        # escapeShellArg must leave them unquoted - otherwise the
+        # generated config becomes needlessly unreadable.
+        noStrayQuotes = !(lib.hasInfix "'" cmd);
       in
-      if hasHelper && hasCert && hasKey && hasTrustAnchor then
+      if hasHelper && hasCert && hasKey && hasTrustAnchor && noStrayQuotes then
         ''
           echo "Generated command: ${cmd}"
           echo "PASS: Credential command generation works"
@@ -178,12 +185,151 @@ let
         ''
           echo "FAIL: Credential command generation incorrect"
           echo "Generated: ${cmd}"
+          echo "noStrayQuotes=${toString noStrayQuotes}"
           exit 1
         ''
     }
     mkdir -p $out
     echo "PASS" > $out/result
   '';
+
+  # The inline credential_process command must quote values containing
+  # shell metacharacters. credential_process is not run through a shell,
+  # but consumers split it with POSIX word rules (botocore uses
+  # shlex.split), so an unquoted value with a space silently becomes two
+  # arguments. This matters most for --cert-selector, whose value always
+  # contains spaces when more than one selector key is set.
+  test-lib-credential-command-quoting =
+    pkgs.runCommand "test-iam-ra-credential-command-quoting" { }
+      ''
+        echo "Testing inline command quoting..."
+        ${
+          let
+            filesCmd = self.lib.mkCredentialProcessCommand {
+              signingHelperPath = "/nix/store/fake/bin/aws_signing_helper";
+              certificate = {
+                source = "files";
+                certPath = "/tmp/has space/cert.pem";
+                keyPath = "/run/secrets/key.pem";
+              };
+              trustAnchorArn = testArns.trustAnchor;
+              profileArn = testArns.profile;
+              roleArn = testArns.role;
+            };
+            keychainCmd = self.lib.mkCredentialProcessCommand {
+              signingHelperPath = "/nix/store/fake/bin/aws_signing_helper";
+              certificate = {
+                source = "macosKeychain";
+                selector = {
+                  subject = "CN=web01";
+                  # Mirrors the real CA CN from operations/ca.py, which
+                  # contains spaces, parentheses AND a slash.
+                  issuer = "CN=IAM Roles Anywhere CA (default/default)";
+                };
+              };
+              trustAnchorArn = testArns.trustAnchor;
+              profileArn = testArns.profile;
+              roleArn = testArns.role;
+            };
+            quotedCertPath = lib.hasInfix "'/tmp/has space/cert.pem'" filesCmd;
+            # The whole multi-pair selector must be ONE quoted argument.
+            quotedSelector = lib.hasInfix "'Key=x509Subject,Value=CN=web01 Key=x509Issuer,Value=CN=IAM Roles Anywhere CA (default/default)'" keychainCmd;
+          in
+          if quotedCertPath && quotedSelector then
+            ''
+              echo "PASS: inline command quotes values with metacharacters"
+            ''
+          else
+            ''
+              echo "FAIL: inline command quoting incorrect"
+              echo "files cmd:    ${filesCmd}"
+              echo "keychain cmd: ${keychainCmd}"
+              echo "quotedCertPath=${toString quotedCertPath}"
+              echo "quotedSelector=${toString quotedSelector}"
+              exit 1
+            ''
+        }
+        mkdir -p $out
+        echo "PASS" > $out/result
+      '';
+
+  # Certificate sources are a tagged union: --cert-selector is mutually
+  # exclusive with --certificate/--private-key in aws_signing_helper, so
+  # each source must emit a DISJOINT argument set. A config that emitted
+  # both would fail at argument-parse time on every credential fetch.
+  test-lib-certificate-source-dispatch =
+    pkgs.runCommand "test-iam-ra-certificate-source-dispatch" { }
+      ''
+        echo "Testing certificate source dispatch..."
+        ${
+          let
+            filesArgs = self.lib.mkCertificateSourceArgs {
+              source = "files";
+              certPath = "/run/secrets/cert.pem";
+              keyPath = "/run/secrets/key.pem";
+            };
+            keychainArgs = self.lib.mkCertificateSourceArgs {
+              source = "macosKeychain";
+              selector = {
+                subject = "CN=web01";
+                issuer = null;
+                serial = null;
+              };
+            };
+            has = needle: haystack: builtins.elem needle haystack;
+
+            # files emits paths and NO selector
+            filesHasPaths = has "--certificate" filesArgs && has "--private-key" filesArgs;
+            filesHasNoSelector = !(has "--cert-selector" filesArgs);
+
+            # keychain emits a selector and NO paths
+            keychainHasSelector = has "--cert-selector" keychainArgs;
+            keychainHasNoPaths = !(has "--certificate" keychainArgs) && !(has "--private-key" keychainArgs);
+            keychainSelectorValue = builtins.elemAt keychainArgs 1 == "Key=x509Subject,Value=CN=web01";
+
+            # An unknown tag must throw rather than silently emit nothing.
+            unknownThrows =
+              !(builtins.tryEval (self.lib.mkCertificateSourceArgs { source = "bogus"; })).success;
+
+            # An empty selector would match every identity in the
+            # keychain, so it must throw too.
+            emptySelectorThrows =
+              !(builtins.tryEval (
+                self.lib.mkCertSelectorValue {
+                  subject = null;
+                  issuer = null;
+                  serial = null;
+                }
+              )).success;
+          in
+          if
+            filesHasPaths
+            && filesHasNoSelector
+            && keychainHasSelector
+            && keychainHasNoPaths
+            && keychainSelectorValue
+            && unknownThrows
+            && emptySelectorThrows
+          then
+            ''
+              echo "PASS: certificate source dispatch is disjoint per source"
+            ''
+          else
+            ''
+              echo "FAIL: certificate source dispatch incorrect"
+              echo "filesHasPaths=${toString filesHasPaths}"
+              echo "filesHasNoSelector=${toString filesHasNoSelector}"
+              echo "keychainHasSelector=${toString keychainHasSelector}"
+              echo "keychainHasNoPaths=${toString keychainHasNoPaths}"
+              echo "keychainSelectorValue=${toString keychainSelectorValue}"
+              echo "unknownThrows=${toString unknownThrows}"
+              echo "emptySelectorThrows=${toString emptySelectorThrows}"
+              exit 1
+            ''
+        }
+        mkdir -p $out
+        echo "PASS" > $out/result
+      '';
 
   # Contract test for the credential_process wrapper script. The
   # script shape is part of the module's public contract (users may
@@ -201,8 +347,11 @@ let
         # wouldn't exercise the quoting path.)
         script = self.lib.mkCredentialProcessScript {
           signingHelperPath = "/nix/store/fake/bin/aws_signing_helper";
-          certificatePath = "/tmp/has space/cert.pem";
-          privateKeyPath = "/run/secrets/key.pem";
+          certificate = {
+            source = "files";
+            certPath = "/tmp/has space/cert.pem";
+            keyPath = "/run/secrets/key.pem";
+          };
           trustAnchorArn = testArns.trustAnchor;
           profileArn = testArns.profile;
           roleArn = testArns.role;
@@ -550,6 +699,176 @@ let
   };
 
   # ===================
+  # Certificate source tests
+  # ===================
+
+  # source = "files" set explicitly rather than relying on the default,
+  # so a change to the default cannot silently pass this test.
+  test-home-cert-source-files-explicit = mkTestHome {
+    extraConfig = {
+      programs.iamRolesAnywhere = {
+        enable = true;
+        identities.default = {
+          trustAnchorArn = testArns.trustAnchor;
+          region = "ap-southeast-2";
+          certificate = {
+            source = "files";
+            certPath = "/run/secrets/cert.pem";
+            keyPath = "/run/secrets/key.pem";
+          };
+          profiles.admin = {
+            profileArn = testArns.profileAdmin;
+            roleArn = testArns.roleAdmin;
+          };
+        };
+      };
+    };
+  };
+
+  # Expected assertion:
+  #   "certPath is required when ... source = \"files\""
+  test-cert-source-files-missing-paths-fails =
+    mkAssertionFailsTest "test-iam-ra-cert-source-files-missing-paths-fails"
+      {
+        programs.iamRolesAnywhere = {
+          enable = true;
+          identities.default = {
+            trustAnchorArn = testArns.trustAnchor;
+            region = "ap-southeast-2";
+            # source defaults to "files" but no paths are given.
+            certificate = { };
+            profiles.admin = {
+              profileArn = testArns.profileAdmin;
+              roleArn = testArns.roleAdmin;
+            };
+          };
+        };
+      };
+
+  # Expected assertion:
+  #   "selector is set but ... source = \"files\", so it would be silently ignored"
+  test-cert-source-files-with-selector-fails =
+    mkAssertionFailsTest "test-iam-ra-cert-source-files-with-selector-fails"
+      {
+        programs.iamRolesAnywhere = {
+          enable = true;
+          identities.default = {
+            trustAnchorArn = testArns.trustAnchor;
+            region = "ap-southeast-2";
+            certificate = {
+              source = "files";
+              certPath = "/run/secrets/cert.pem";
+              keyPath = "/run/secrets/key.pem";
+              selector.subject = "CN=web01";
+            };
+            profiles.admin = {
+              profileArn = testArns.profileAdmin;
+              roleArn = testArns.roleAdmin;
+            };
+          };
+        };
+      };
+
+  # Expected assertion:
+  #   "source = \"macosKeychain\" requires at least one of ... selector"
+  # An empty selector would match every identity in the keychain.
+  test-cert-source-keychain-empty-selector-fails =
+    mkAssertionFailsTest "test-iam-ra-cert-source-keychain-empty-selector-fails"
+      {
+        programs.iamRolesAnywhere = {
+          enable = true;
+          identities.default = {
+            trustAnchorArn = testArns.trustAnchor;
+            region = "ap-southeast-2";
+            certificate.source = "macosKeychain";
+            profiles.admin = {
+              profileArn = testArns.profileAdmin;
+              roleArn = testArns.roleAdmin;
+            };
+          };
+        };
+      };
+
+  # Expected assertion:
+  #   "certPath/keyPath cannot be combined with source = \"macosKeychain\""
+  # aws_signing_helper marks the flags mutually exclusive.
+  test-cert-source-keychain-with-paths-fails =
+    mkAssertionFailsTest "test-iam-ra-cert-source-keychain-with-paths-fails"
+      {
+        programs.iamRolesAnywhere = {
+          enable = true;
+          identities.default = {
+            trustAnchorArn = testArns.trustAnchor;
+            region = "ap-southeast-2";
+            certificate = {
+              source = "macosKeychain";
+              selector.subject = "CN=web01";
+              certPath = "/run/secrets/cert.pem";
+              keyPath = "/run/secrets/key.pem";
+            };
+            profiles.admin = {
+              profileArn = testArns.profileAdmin;
+              roleArn = testArns.roleAdmin;
+            };
+          };
+        };
+      };
+
+  # An unknown source must be rejected by the enum type itself, before
+  # any assertion runs.
+  test-cert-source-unknown-fails = mkAssertionFailsTest "test-iam-ra-cert-source-unknown-fails" {
+    programs.iamRolesAnywhere = {
+      enable = true;
+      identities.default = {
+        trustAnchorArn = testArns.trustAnchor;
+        region = "ap-southeast-2";
+        certificate.source = "linuxKeyring";
+        profiles.admin = {
+          profileArn = testArns.profileAdmin;
+          roleArn = testArns.roleAdmin;
+        };
+      };
+    };
+  };
+
+  # macosKeychain is platform-gated. On Darwin a valid config must
+  # evaluate; on Linux the same config must FAIL, because
+  # aws_signing_helper's cert-store signer is a stub that errors at
+  # runtime on Linux. One of these two is selected per system so the
+  # check is meaningful on both.
+  keychainConfig = {
+    programs.iamRolesAnywhere = {
+      enable = true;
+      useCredentialProcessWrapper = true;
+      identities.default = {
+        trustAnchorArn = testArns.trustAnchor;
+        region = "ap-southeast-2";
+        certificate = {
+          source = "macosKeychain";
+          selector = {
+            subject = "CN=web01";
+            issuer = "CN=IAM Roles Anywhere CA (default/default)";
+          };
+        };
+        profiles.admin = {
+          profileArn = testArns.profileAdmin;
+          roleArn = testArns.roleAdmin;
+          makeDefault = true;
+        };
+      };
+    };
+  };
+
+  test-cert-source-keychain-platform =
+    if pkgs.stdenv.isDarwin then
+      # Darwin: must evaluate successfully.
+      mkTestHome { extraConfig = keychainConfig; }
+    else
+      # Linux: expected assertion is
+      #   "source = \"macosKeychain\" is only supported on Darwin"
+      mkAssertionFailsTest "test-iam-ra-cert-source-keychain-rejected-on-linux" keychainConfig;
+
+  # ===================
   # Negative Tests (assertion coverage)
   # ===================
   # These exercise module-validation.nix assertions by building configs
@@ -648,6 +967,8 @@ in
   iam-ra-lib-loads = test-lib-loads;
   iam-ra-lib-validation = test-lib-validation;
   iam-ra-lib-credential-command = test-lib-credential-command;
+  iam-ra-lib-credential-command-quoting = test-lib-credential-command-quoting;
+  iam-ra-lib-certificate-source-dispatch = test-lib-certificate-source-dispatch;
   iam-ra-lib-credential-script = test-lib-credential-script;
 
   # Module existence tests
@@ -663,6 +984,15 @@ in
   iam-ra-home-multi-identity = test-home-multi-identity;
   iam-ra-home-wrapper-scripts = test-home-wrapper-scripts;
   iam-ra-home-wrapper-scripts-multi-identity = test-home-wrapper-scripts-multi-identity;
+
+  # Certificate source tests
+  iam-ra-home-cert-source-files-explicit = test-home-cert-source-files-explicit;
+  iam-ra-cert-source-keychain-platform = test-cert-source-keychain-platform;
+  iam-ra-cert-source-files-missing-paths-fails = test-cert-source-files-missing-paths-fails;
+  iam-ra-cert-source-files-with-selector-fails = test-cert-source-files-with-selector-fails;
+  iam-ra-cert-source-keychain-empty-selector-fails = test-cert-source-keychain-empty-selector-fails;
+  iam-ra-cert-source-keychain-with-paths-fails = test-cert-source-keychain-with-paths-fails;
+  iam-ra-cert-source-unknown-fails = test-cert-source-unknown-fails;
 
   # Validation assertion tests (negative - config SHOULD fail)
   iam-ra-empty-identities-fails = test-empty-identities-fails;
