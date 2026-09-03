@@ -273,14 +273,26 @@ class TestRequestCertificate:
 
         assert first.csr_pem != second.csr_pem
 
-    def test_unimplemented_backend_fails(self, xdg: Path) -> None:
+    def test_unknown_backend_fails(self, xdg: Path) -> None:
+        """Deliberately does not exercise macosKeychain through this layer.
+
+        RequestConfig has no seam for injecting a keychain path, so requesting
+        that backend here would create a keychain in the real ~/Library and
+        write a password into the developer's login keychain. The keychain
+        backend is covered directly in tests/test_keystore.py, against a
+        throwaway keychain.
+        """
         match request_certificate(
-            RequestConfig(namespace="test", hostname="web01", key_store="macosKeychain")
+            RequestConfig(
+                namespace="test",
+                hostname="web01",
+                key_store="nonsense",  # type: ignore[arg-type]
+            )
         ):
             case Err(_):
                 pass
             case Ok(_):
-                pytest.fail("macosKeychain is not implemented yet")
+                pytest.fail("an unknown backend should fail")
 
 
 # =============================================================================

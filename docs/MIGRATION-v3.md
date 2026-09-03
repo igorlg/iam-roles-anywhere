@@ -175,6 +175,50 @@ So these commands now update the *recorded* role list and print the ARNs to past
 `profiles.<name>` entry from Nix and rebuild, the host can still assume the role. The command warns
 about this.
 
+## Key stores
+
+`--key-store` chooses where the host's private key lives.
+
+| Backend | Platform | Key protection |
+|---|---|---|
+| `files` (default) | any | PEM on disk, `0600` in a `0700` directory. Never transmitted, never escrowed — but readable by anyone who can read the file. |
+| `macosKeychain` | macOS only | Non-extractable key in a dedicated keychain. Cannot be copied off the machine, even by a process running as you. |
+
+```bash
+iam-ra host enroll mbp --role admin --key-store macosKeychain
+```
+
+### What `macosKeychain` actually protects against
+
+The key is imported with `security import -x`, so the Security framework refuses to export it. An
+attacker with code execution as your user can still *use* it — but they could get AWS credentials by
+running `aws` anyway. What they cannot do is take the key with them for offline or later use. That
+is the whole difference from `files`, and it is a meaningful one against backup theft, stolen disk
+images, and snapshot exfiltration.
+
+It is deliberately imported with `-A` (any application may use it) rather than `-T` (only a named
+binary). A `-T` ACL sounds stronger but is not: the nix-built `aws_signing_helper` is ad-hoc signed
+with no Team ID, so macOS identifies it by content hash, and **every rebuild would invalidate the ACL
+and turn each `aws` command into an interactive password prompt**. The ACL also restricts only
+*which binary* may use the key, while any process running as you can simply execute that binary. So
+it costs reliability and buys close to nothing.
+
+### Operational notes
+
+- One keychain per machine at `~/Library/Keychains/iam-ra.keychain`, holding one identity per host,
+  selected by certificate subject.
+- Its password is generated randomly and stored in your **login keychain**, so it is protected by
+  your login password and FileVault rather than sitting in a file.
+- The keychain is added to your keychain search list (existing entries are preserved — the
+  credential helper only searches listed keychains) and `set-keychain-settings` disables the default
+  ~5 minute auto-relock, which would otherwise break credential fetches after enrolment.
+- Certificates chain to your own CA, not a system trust anchor, so `security find-identity -v` reports
+  zero identities and `find-identity` shows `CSSMERR_TP_NOT_TRUSTED`. This is expected and harmless:
+  IAM Roles Anywhere validates against its trust anchor server-side.
+- `iam-ra host offboard` cannot remove a key whose certificate was never installed — `security` has
+  no command to delete a bare private key. Such a key is inert: non-extractable, and unusable without
+  a certificate to select it.
+
 ## Migration path
 
 Re-enrolment. There is no in-place upgrade.
