@@ -36,8 +36,12 @@ def destroy(ctx: AwsContext, namespace: str) -> Result[None, DestroyError]:
 
     bucket_name = state.init.bucket_arn.resource_id
 
-    # Step 1: Delete all host stacks
+    # Step 1: Delete all host stacks.
+    # v4 hosts (host-generated keys) have no stack and no S3 objects, so
+    # there is nothing to delete for them.
     for hostname, host in state.hosts.items():
+        if host.stack_name is None:
+            continue
         match offboard_host(ctx, host.stack_name, bucket_name, namespace, hostname):
             case Err(e):
                 return Err(e)

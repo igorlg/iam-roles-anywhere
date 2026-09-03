@@ -55,9 +55,13 @@ def status(
         #                  "internal": { "stack_name": str } }, ... ],
         #     "hosts": [ { "hostname": str, "role_names": [str, ...],
         #                  "scope": str,
-        #                  "internal": { "stack_name": str,
-        #                                "certificate_secret_arn": str,
-        #                                "private_key_secret_arn": str } }, ...]
+        #                  "key_store": str | null,
+        #                  "certificate_serial": str | null,
+        #                  "not_after": str | null,
+        #                  "legacy_managed_key": bool,
+        #                  "internal": { "stack_name": str | null,
+        #                                "certificate_secret_arn": str | null,
+        #                                "private_key_secret_arn": str | null } }, ...]
         #   }
         infra = (
             {
@@ -94,10 +98,26 @@ def status(
                 "hostname": hostname,
                 "role_names": list(host.role_names),
                 "scope": host.scope,
+                # v4 fields. key_store is null for hosts onboarded under
+                # v2/v3, where the admin generated the key.
+                "key_store": host.key_store,
+                "certificate_serial": host.certificate_serial,
+                "not_after": host.not_after,
+                "legacy_managed_key": host.is_legacy_managed_key,
+                # These stay null for v4 hosts - no stack, no escrowed secret.
+                # Kept as null rather than omitted so the shape is stable.
                 "internal": {
                     "stack_name": host.stack_name,
-                    "certificate_secret_arn": str(host.certificate_secret_arn),
-                    "private_key_secret_arn": str(host.private_key_secret_arn),
+                    "certificate_secret_arn": (
+                        str(host.certificate_secret_arn)
+                        if host.certificate_secret_arn is not None
+                        else None
+                    ),
+                    "private_key_secret_arn": (
+                        str(host.private_key_secret_arn)
+                        if host.private_key_secret_arn is not None
+                        else None
+                    ),
                 },
             }
             for hostname, host in sorted(current.hosts.items())

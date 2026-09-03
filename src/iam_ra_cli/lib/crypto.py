@@ -59,6 +59,48 @@ class HostKeyAndCsr:
     csr_pem: str
 
 
+@dataclass(frozen=True)
+class CertificateInfo:
+    """Public facts about an issued certificate, for recording in state."""
+
+    serial: str
+    not_before: str
+    not_after: str
+    subject_common_name: str | None
+
+
+def inspect_certificate(cert_pem: str) -> Result[CertificateInfo, CsrParseError]:
+    """Extract identifying and expiry data from a certificate.
+
+    Used so `iam-ra status` can age-check certificates without the state
+    document having to store the certificate itself.
+
+    The serial is rendered as uppercase hex with **no leading zeros**, which
+    is the form the credential helper's ``--cert-selector x509Serial`` expects:
+    it parses the value base-16 and compares against Go's ``big.Int``
+    rendering, which omits leading zeros. Note this differs from
+    ``openssl x509 -serial``, which pads to an even number of digits - a
+    certificate whose serial starts with a zero byte prints as ``0B07...``
+    under openssl but must be given as ``B07...`` in a selector.
+    """
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem.encode())
+    except (ValueError, TypeError) as e:
+        return Err(CsrParseError(reason=f"not a valid PEM certificate: {e}"))
+
+    cn_attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    common_name = str(cn_attrs[0].value) if cn_attrs else None
+
+    return Ok(
+        CertificateInfo(
+            serial=format(cert.serial_number, "X"),
+            not_before=cert.not_valid_before_utc.isoformat(),
+            not_after=cert.not_valid_after_utc.isoformat(),
+            subject_common_name=common_name,
+        )
+    )
+
+
 def generate_ca(
     common_name: str = "IAM Roles Anywhere CA",
     validity_years: int = 10,

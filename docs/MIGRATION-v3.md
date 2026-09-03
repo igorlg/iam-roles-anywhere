@@ -74,6 +74,34 @@ This fixes a latent bug: a certificate path containing a space previously produc
 in the inline form, while the wrapper-script form quoted correctly. Plain paths and ARNs are
 unaffected, since `escapeShellArg` leaves metacharacter-free tokens alone.
 
+## State schema v4
+
+`State.hosts[<name>]` changed shape. **No migration step is required** — v3 state documents load
+unchanged, because the fields that v4 stops populating simply became optional.
+
+Added, for hosts enrolled with a host-generated key:
+
+| Field | Meaning |
+|---|---|
+| `key_store` | Which KeyStore holds the private key (`files`, `macosKeychain`). `null` for v2/v3 hosts. |
+| `certificate_serial` | Uppercase hex, **no leading zeros** — the form `--cert-selector x509Serial` expects. Note this differs from `openssl x509 -serial`, which zero-pads. |
+| `not_after` | ISO 8601 expiry, so `iam-ra status` can warn about ageing certificates. |
+
+Now optional, and `null` for v4 hosts:
+
+| Field | Why |
+|---|---|
+| `stack_name` | v4 hosts have no per-host CloudFormation stack. |
+| `certificate_secret_arn` | The certificate is not escrowed in Secrets Manager. |
+| `private_key_secret_arn` | The private key never leaves the host. |
+
+A host with `key_store == null` and a `private_key_secret_arn` is reported as
+`legacy_managed_key: true` by `iam-ra status --json`. Those hosts keep working, but their private
+key exists in several places outside the host; re-enrolling replaces it with a host-generated key.
+
+`iam-ra host offboard` and `iam-ra destroy` now skip CloudFormation and S3 cleanup for hosts with no
+`stack_name`, since there is nothing in AWS to tear down.
+
 ## Migration path
 
 Re-enrolment. There is no in-place upgrade.

@@ -1,6 +1,7 @@
 """Tests for lib/crypto.py - Certificate generation and CSR signing."""
 
 import base64
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography import x509
@@ -15,6 +16,7 @@ from iam_ra_cli.lib.crypto import (
     generate_host_cert,
     generate_host_keypair_and_csr,
     generate_private_key,
+    inspect_certificate,
     parse_and_validate_csr,
     sign_csr,
 )
@@ -493,3 +495,122 @@ class TestParseAndValidateCsr:
                 assert e.reason
             case Ok(_):
                 pytest.fail("garbage should not parse")
+
+
+
+class TestInspectCertificate:
+    """inspect_certificate extracts what state needs to record about an
+    issued certificate without storing the certificate itself."""
+
+    @pytest.fixture
+    def ca_keypair(self) -> KeyPair:
+        return generate_ca(common_name="Test CA")
+
+    def _cert_with_serial(self, ca: KeyPair, serial: int) -> str:
+        """Issue a certificate with an exact serial, so serial formatting can
+        be asserted deterministically rather than depending on randomness."""
+        ca_cert = x509.load_pem_x509_certificate(ca.certificate.encode())
+        ca_key = serialization.load_pem_private_key(ca.private_key.encode(), password=None)
+        key = generate_private_key()
+        now = datetime.now(UTC)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "web01")]))
+            .issuer_name(ca_cert.subject)
+            .public_key(key.public_key())
+            .serial_number(serial)
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=7))
+            .sign(ca_key, hashes.SHA256())
+        )
+        return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+    def test_extracts_common_name(self, ca_keypair: KeyPair) -> None:
+        cert_pem = self._cert_with_serial(ca_keypair, 0x1234)
+
+        match inspect_certificate(cert_pem):
+            case Ok(info):
+                assert info.subject_common_name == "web01"
+            case Err(e):
+                pytest.fail(f"unexpected Err({e})")
+
+    def test_serial_is_uppercase_hex(self, ca_keypair: KeyPair) -> None:
+        cert_pem = self._cert_with_serial(ca_keypair, 0xABCDEF)
+
+        match inspect_certificate(cert_pem):
+            case Ok(info):
+                assert info.serial == "ABCDEF"
+            case Err(e):
+                pytest.fail(f"unexpected Err({e})")
+
+    def test_serial_has_no_leading_zeros(self, ca_keypair: KeyPair) -> None:
+        """--cert-selector x509Serial is parsed base-16 and compared against
+        Go's big.Int rendering, which omits leading zeros. `openssl x509
+        -serial` pads to an even digit count, so the two disagree for serials
+        whose top byte is < 0x10. We must match the helper, not openssl.
+        """
+        cert_pem = self._cert_with_serial(ca_keypair, 0x0B072F63)
+
+        match inspect_certificate(cert_pem):
+            case Ok(info):
+                assert info.serial == "B072F63"
+                assert not info.serial.startswith("0")
+            case Err(e):
+                pytest.fail(f"unexpected Err({e})")
+
+    def test_validity_is_iso8601(self, ca_keypair: KeyPair) -> None:
+        cert_pem = self._cert_with_serial(ca_keypair, 0x01)
+
+        match inspect_certificate(cert_pem):
+            case Ok(info):
+                # Round-trips through fromisoformat, and is timezone-aware so
+                # expiry comparisons cannot silently compare naive to aware.
+                parsed = datetime.fromisoformat(info.not_after)
+                assert parsed.tzinfo is not None
+                assert datetime.fromisoformat(info.not_before) < parsed
+            case Err(e):
+                pytest.fail(f"unexpected Err({e})")
+
+    def test_reports_expiry_seven_days_out(self, ca_keypair: KeyPair) -> None:
+        cert_pem = self._cert_with_serial(ca_keypair, 0x02)
+
+        match inspect_certificate(cert_pem):
+            case Ok(info):
+                delta = datetime.fromisoformat(info.not_after) - datetime.now(UTC)
+                assert 6 <= delta.days <= 7
+            case Err(e):
+                pytest.fail(f"unexpected Err({e})")
+
+    def test_rejects_garbage(self) -> None:
+        match inspect_certificate("not a certificate"):
+            case Err(e):
+                assert isinstance(e, CsrParseError)
+            case Ok(_):
+                pytest.fail("garbage should be rejected")
+
+    def test_rejects_a_csr(self) -> None:
+        """A CSR is not a certificate - passing one must fail, not half-work."""
+        csr_pem = build_csr(generate_private_key(), "web01")
+
+        match inspect_certificate(csr_pem):
+            case Err(e):
+                assert isinstance(e, CsrParseError)
+            case Ok(_):
+                pytest.fail("a CSR is not a certificate")
+
+    def test_matches_signed_certificate_from_sign_csr(self, ca_keypair: KeyPair) -> None:
+        """The normal path: whatever sign_csr issues must be inspectable."""
+        csr_pem = build_csr(generate_private_key(), "web01")
+        match sign_csr(csr_pem, ca_keypair.certificate, ca_keypair.private_key, "web01"):
+            case Ok(cert_pem):
+                pass
+            case Err(e):
+                pytest.fail(f"sign_csr failed: {e}")
+
+        match inspect_certificate(cert_pem):
+            case Ok(info):
+                assert info.subject_common_name == "web01"
+                assert info.serial
+                assert info.not_after
+            case Err(e):
+                pytest.fail(f"unexpected Err({e})")

@@ -898,3 +898,115 @@ class TestV2ToV3Migration:
         assert state.cas["default"].account_id == "123456789012"
         assert state.namespace_info is not None
         assert state.namespace_info.account_id == "123456789012"
+
+
+
+class TestHostSchemaV4:
+    """Host gained host-generated-key fields in v4, and the v2/v3
+    stack/secret fields became optional.
+
+    The critical property is that existing v3 state keeps loading, since v3
+    hosts remain functional until they are re-enrolled.
+    """
+
+    V3_HOST_JSON = {
+        "stack_name": "iam-ra-default-host-web1",
+        "hostname": "web1",
+        "role_names": ["admin"],
+        "certificate_secret_arn": (
+            "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:cert-AbCdEf"
+        ),
+        "private_key_secret_arn": (
+            "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:key-AbCdEf"
+        ),
+        "scope": "default",
+    }
+
+    def _state_json(self, host_raw: dict) -> str:
+        return json.dumps(
+            {
+                "namespace": "test",
+                "region": "ap-southeast-2",
+                "version": "3.0.0-dev",
+                "hosts": {host_raw["hostname"]: host_raw},
+            }
+        )
+
+    def test_v3_host_state_still_loads(self) -> None:
+        state = State.from_json(self._state_json(self.V3_HOST_JSON))
+
+        host = state.hosts["web1"]
+        assert host.hostname == "web1"
+        assert host.role_names == ("admin",)
+        assert host.stack_name == "iam-ra-default-host-web1"
+        assert host.certificate_secret_arn is not None
+
+    def test_v3_host_has_no_key_store(self) -> None:
+        """key_store is the marker distinguishing v4 from legacy hosts."""
+        state = State.from_json(self._state_json(self.V3_HOST_JSON))
+
+        assert state.hosts["web1"].key_store is None
+
+    def test_v3_host_is_flagged_as_legacy_managed_key(self) -> None:
+        state = State.from_json(self._state_json(self.V3_HOST_JSON))
+        host = state.hosts["web1"]
+
+        assert host.is_legacy_managed_key is True
+        assert host.uses_host_generated_key is False
+
+    def test_v4_host_needs_only_hostname_and_roles(self) -> None:
+        """No stack name, no Secrets Manager ARNs - none of it exists now."""
+        host = Host(hostname="web1", role_names=("admin",))
+
+        assert host.stack_name is None
+        assert host.certificate_secret_arn is None
+        assert host.private_key_secret_arn is None
+        assert host.scope == "default"
+
+    def test_v4_host_records_key_store_and_cert_metadata(self) -> None:
+        host = Host(
+            hostname="web1",
+            role_names=("admin",),
+            key_store="files",
+            certificate_serial="B072F6359FB6A14BA897B6FC858BED80E6AC6ED",
+            not_after="2026-09-10T12:00:00+00:00",
+        )
+
+        assert host.uses_host_generated_key is True
+        assert host.is_legacy_managed_key is False
+
+    def test_v4_host_round_trips_through_json(self) -> None:
+        original = State(
+            namespace="test",
+            region="ap-southeast-2",
+            version="3.0.0-dev",
+            hosts={
+                "web1": Host(
+                    hostname="web1",
+                    role_names=("admin", "readonly"),
+                    scope="work",
+                    key_store="macosKeychain",
+                    certificate_serial="ABC123",
+                    not_after="2026-09-10T12:00:00+00:00",
+                )
+            },
+        )
+
+        restored = State.from_json(original.to_json())
+
+        assert restored.hosts["web1"] == original.hosts["web1"]
+
+    def test_legacy_flag_is_false_when_key_store_is_set(self) -> None:
+        """A re-enrolled host keeps its old ARNs until cleanup, but is no
+        longer legacy - key_store wins."""
+        host = Host(
+            hostname="web1",
+            role_names=("admin",),
+            key_store="files",
+            private_key_secret_arn=Arn(
+                "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:key-AbCdEf"
+            ),
+        )
+
+        assert host.is_legacy_managed_key is False
+        assert host.uses_host_generated_key is True

@@ -169,14 +169,17 @@ def _render_human(result: OnboardResult) -> None:
 
     # De-emphasized: Secrets Manager ARNs (internal AWS resources - users rarely
     # reference these directly in Nix, but keep them for debugging/automation).
-    click.echo()
-    click.secho("Internal:", dim=True)
-    echo_key_value(
-        "Certificate secret", str(result.host.certificate_secret_arn), indent=1
-    )
-    echo_key_value(
-        "Private key secret", str(result.host.private_key_secret_arn), indent=1
-    )
+    # These are only populated by the legacy v2 flow, where the admin generated
+    # the key and escrowed it in AWS.
+    if result.host.certificate_secret_arn is not None:
+        click.echo()
+        click.secho("Internal:", dim=True)
+        echo_key_value(
+            "Certificate secret", str(result.host.certificate_secret_arn), indent=1
+        )
+        echo_key_value(
+            "Private key secret", str(result.host.private_key_secret_arn), indent=1
+        )
 
 
 def _build_json_payload(result: OnboardResult) -> dict[str, object]:
@@ -200,9 +203,9 @@ def _build_json_payload(result: OnboardResult) -> dict[str, object]:
           "keys": [str, ...]
         } | null,
         "internal": {
-          "stack_name": str,
-          "certificate_secret_arn": str,
-          "private_key_secret_arn": str
+          "stack_name": str | null,
+          "certificate_secret_arn": str | null,
+          "private_key_secret_arn": str | null
         }
       }
     """
@@ -234,8 +237,16 @@ def _build_json_payload(result: OnboardResult) -> dict[str, object]:
         "secrets_file": secrets_file_payload,
         "internal": {
             "stack_name": result.host.stack_name,
-            "certificate_secret_arn": str(result.host.certificate_secret_arn),
-            "private_key_secret_arn": str(result.host.private_key_secret_arn),
+            "certificate_secret_arn": (
+                str(result.host.certificate_secret_arn)
+                if result.host.certificate_secret_arn is not None
+                else None
+            ),
+            "private_key_secret_arn": (
+                str(result.host.private_key_secret_arn)
+                if result.host.private_key_secret_arn is not None
+                else None
+            ),
         },
     }
 

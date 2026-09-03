@@ -387,12 +387,19 @@ def offboard(
     host = state.hosts[hostname]
     bucket_name = state.init.bucket_arn.resource_id
 
-    # Delete host stack and cleanup S3
-    match offboard_host_op(ctx, host.stack_name, bucket_name, namespace, hostname):
-        case Err() as e:
-            return e
-        case Ok(_):
-            pass
+    # Delete host stack and cleanup S3.
+    #
+    # v4 hosts have no CloudFormation stack and no S3 objects: the key was
+    # generated on the host and the certificate was never uploaded. For those
+    # there is nothing to tear down in AWS, so offboarding is purely a state
+    # removal. Skipping is not just an optimisation - passing a None stack
+    # name to CloudFormation would fail.
+    if host.stack_name is not None:
+        match offboard_host_op(ctx, host.stack_name, bucket_name, namespace, hostname):
+            case Err() as e:
+                return e
+            case Ok(_):
+                pass
 
     # Update state
     del state.hosts[hostname]
