@@ -1,16 +1,29 @@
-"""Tests for lib/crypto.py - Certificate generation."""
+"""Tests for lib/crypto.py - Certificate generation and CSR signing."""
+
+import base64
 
 import pytest
 from cryptography import x509
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID
 
 from iam_ra_cli.lib.crypto import (
     KeyPair,
+    build_csr,
     generate_ca,
     generate_host_cert,
     generate_host_keypair_and_csr,
+    generate_private_key,
+    parse_and_validate_csr,
+    sign_csr,
 )
+from iam_ra_cli.lib.errors import (
+    CsrInvalidSignatureError,
+    CsrParseError,
+    CsrUnsupportedKeyError,
+)
+from iam_ra_cli.lib.result import Err, Ok
 
 
 class TestGenerateCA:
@@ -257,3 +270,226 @@ class TestGenerateHostKeypairAndCSR:
 
         assert result1.private_key_pem != result2.private_key_pem
         assert result1.csr_pem != result2.csr_pem
+
+
+
+class TestSignCsr:
+    """Tests for sign_csr - the single certificate-issuing primitive.
+
+    The security-critical property is that a CSR contributes ONLY a public key.
+    Everything else in the issued certificate comes from the caller.
+    """
+
+    @pytest.fixture
+    def ca_keypair(self) -> KeyPair:
+        return generate_ca(common_name="Test CA")
+
+    @pytest.fixture
+    def csr_pem(self) -> str:
+        return build_csr(generate_private_key(), "web01")
+
+    def _sign(self, csr_pem: str, ca: KeyPair, cn: str = "web01", **kw: object) -> str:
+        match sign_csr(csr_pem, ca.certificate, ca.private_key, cn, **kw):
+            case Ok(pem):
+                return pem
+            case Err(e):
+                pytest.fail(f"expected Ok, got Err({e})")
+
+    def test_issues_pem_certificate(self, csr_pem: str, ca_keypair: KeyPair) -> None:
+        cert_pem = self._sign(csr_pem, ca_keypair)
+
+        assert cert_pem.startswith("-----BEGIN CERTIFICATE-----")
+
+    def test_certificate_is_signed_by_ca(self, csr_pem: str, ca_keypair: KeyPair) -> None:
+        cert = x509.load_pem_x509_certificate(self._sign(csr_pem, ca_keypair).encode())
+        ca_cert = x509.load_pem_x509_certificate(ca_keypair.certificate.encode())
+
+        assert cert.issuer == ca_cert.subject
+        # Raises if the signature does not verify.
+        ca_cert.public_key().verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            cert.signature_algorithm_parameters,
+        )
+
+    def test_certifies_the_csr_public_key(self, ca_keypair: KeyPair) -> None:
+        """The issued cert must bind the requester's key, not a fresh one."""
+        requester_key = generate_private_key()
+        csr_pem = build_csr(requester_key, "web01")
+
+        cert = x509.load_pem_x509_certificate(self._sign(csr_pem, ca_keypair).encode())
+
+        spki = serialization.PublicFormat.SubjectPublicKeyInfo
+        assert cert.public_key().public_bytes(
+            serialization.Encoding.DER, spki
+        ) == requester_key.public_key().public_bytes(serialization.Encoding.DER, spki)
+
+    def test_subject_comes_from_caller_not_csr(self, ca_keypair: KeyPair) -> None:
+        """A host must not be able to name itself something else.
+
+        This is the key defence once CSRs are generated on (possibly
+        compromised) hosts: the CA rebuilds the subject from its own input.
+        """
+        lying_csr = build_csr(generate_private_key(), "admin-box")
+
+        cert = x509.load_pem_x509_certificate(
+            self._sign(lying_csr, ca_keypair, cn="web01").encode()
+        )
+
+        cn = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)[0]
+        assert cn.value == "web01"
+        assert "admin-box" not in cert.subject.rfc4514_string()
+
+    def test_csr_requested_extensions_are_not_copied(self, ca_keypair: KeyPair) -> None:
+        """A CSR must not be able to talk itself into being a CA."""
+        key = generate_private_key()
+        sneaky_csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "web01")]))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256())
+        )
+        sneaky_pem = sneaky_csr.public_bytes(serialization.Encoding.PEM).decode()
+
+        cert = x509.load_pem_x509_certificate(self._sign(sneaky_pem, ca_keypair).encode())
+
+        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+        assert bc.value.ca is False
+
+    def test_issued_cert_has_client_auth_eku(self, csr_pem: str, ca_keypair: KeyPair) -> None:
+        cert = x509.load_pem_x509_certificate(self._sign(csr_pem, ca_keypair).encode())
+
+        eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+        assert ExtendedKeyUsageOID.CLIENT_AUTH in eku.value
+
+    def test_validity_days_honoured(self, csr_pem: str, ca_keypair: KeyPair) -> None:
+        cert = x509.load_pem_x509_certificate(
+            self._sign(csr_pem, ca_keypair, validity_days=7).encode()
+        )
+
+        assert (cert.not_valid_after_utc - cert.not_valid_before_utc).days == 7
+
+    def test_serials_are_unique(self, csr_pem: str, ca_keypair: KeyPair) -> None:
+        c1 = x509.load_pem_x509_certificate(self._sign(csr_pem, ca_keypair).encode())
+        c2 = x509.load_pem_x509_certificate(self._sign(csr_pem, ca_keypair).encode())
+
+        assert c1.serial_number != c2.serial_number
+
+    def test_rejects_unparseable_csr(self, ca_keypair: KeyPair) -> None:
+        match sign_csr("not a csr", ca_keypair.certificate, ca_keypair.private_key, "web01"):
+            case Err(e):
+                assert isinstance(e, CsrParseError)
+            case Ok(_):
+                pytest.fail("garbage CSR should be refused")
+
+    def test_rejects_csr_with_broken_signature(self, ca_keypair: KeyPair) -> None:
+        """Proof of possession: a tampered CSR must not be signed."""
+        csr = x509.load_pem_x509_csr(build_csr(generate_private_key(), "web01").encode())
+        der = bytearray(csr.public_bytes(serialization.Encoding.DER))
+        # Corrupt bytes near the end, which land in the signature.
+        der[-1] ^= 0xFF
+        der[-2] ^= 0xFF
+        tampered_pem = (
+            "-----BEGIN CERTIFICATE REQUEST-----\n"
+            + base64.encodebytes(bytes(der)).decode()
+            + "-----END CERTIFICATE REQUEST-----\n"
+        )
+
+        match sign_csr(tampered_pem, ca_keypair.certificate, ca_keypair.private_key, "web01"):
+            case Err(e):
+                # Specifically the proof-of-possession check, not a parse failure.
+                assert isinstance(e, CsrInvalidSignatureError)
+            case Ok(_):
+                pytest.fail("CSR with an invalid signature should be refused")
+
+    def test_rejects_weak_rsa_key(self, ca_keypair: KeyPair) -> None:
+        weak_key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "web01")]))
+            .sign(weak_key, hashes.SHA256())
+        )
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+
+        match sign_csr(csr_pem, ca_keypair.certificate, ca_keypair.private_key, "web01"):
+            case Err(e):
+                assert isinstance(e, CsrUnsupportedKeyError)
+                assert "too small" in e.reason
+            case Ok(_):
+                pytest.fail("1024-bit RSA should be refused")
+
+    def test_accepts_strong_rsa_key(self, ca_keypair: KeyPair) -> None:
+        strong_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "web01")]))
+            .sign(strong_key, hashes.SHA256())
+        )
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+
+        assert self._sign(csr_pem, ca_keypair).startswith("-----BEGIN CERTIFICATE-----")
+
+    def test_rejects_ed25519_key(self, ca_keypair: KeyPair) -> None:
+        """Ed25519 certs would be inert - the helper cannot sign with them."""
+        ed_key = ed25519.Ed25519PrivateKey.generate()
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "web01")]))
+            .sign(ed_key, None)
+        )
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+
+        match sign_csr(csr_pem, ca_keypair.certificate, ca_keypair.private_key, "web01"):
+            case Err(e):
+                assert isinstance(e, CsrUnsupportedKeyError)
+                assert "RSA or ECDSA" in e.reason
+            case Ok(_):
+                pytest.fail("Ed25519 should be refused")
+
+    def test_rejects_disallowed_ec_curve(self, ca_keypair: KeyPair) -> None:
+        weak_key = ec.generate_private_key(ec.SECP192R1())
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "web01")]))
+            .sign(weak_key, hashes.SHA256())
+        )
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+
+        match sign_csr(csr_pem, ca_keypair.certificate, ca_keypair.private_key, "web01"):
+            case Err(e):
+                assert isinstance(e, CsrUnsupportedKeyError)
+                assert "curve not allowed" in e.reason
+            case Ok(_):
+                pytest.fail("P-192 should be refused")
+
+    @pytest.mark.parametrize("curve", [ec.SECP256R1(), ec.SECP384R1(), ec.SECP521R1()])
+    def test_accepts_allowed_ec_curves(self, ca_keypair: KeyPair, curve: object) -> None:
+        key = ec.generate_private_key(curve)
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "web01")]))
+            .sign(key, hashes.SHA256())
+        )
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+
+        assert self._sign(csr_pem, ca_keypair).startswith("-----BEGIN CERTIFICATE-----")
+
+
+class TestParseAndValidateCsr:
+    def test_accepts_a_good_csr(self) -> None:
+        csr_pem = build_csr(generate_private_key(), "web01")
+
+        match parse_and_validate_csr(csr_pem):
+            case Ok(csr):
+                cn = csr.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)[0]
+                assert cn.value == "web01"
+            case Err(e):
+                pytest.fail(f"good CSR rejected: {e}")
+
+    def test_reports_parse_failure_reason(self) -> None:
+        match parse_and_validate_csr("garbage"):
+            case Err(e):
+                assert isinstance(e, CsrParseError)
+                assert e.reason
+            case Ok(_):
+                pytest.fail("garbage should not parse")

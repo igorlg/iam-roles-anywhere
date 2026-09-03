@@ -172,6 +172,80 @@ class CannotRemoveLastRoleError:
 
 
 # =============================================================================
+# CSR / Certificate Signing Errors
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class CsrParseError:
+    """The supplied bytes are not a valid PEM certificate signing request."""
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class CsrInvalidSignatureError:
+    """The CSR's self-signature does not verify against its own public key.
+
+    A CSR is self-signed by the requesting key, which proves the requester
+    holds the private key for the public key being certified (proof of
+    possession). A CSR that fails this check must never be signed - it may
+    be a mangled transfer, or an attempt to get a certificate issued for
+    someone else's public key.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class CsrUnsupportedKeyError:
+    """The CSR's public key is of a type or size this CA will not certify.
+
+    IAM Roles Anywhere signs CreateSession requests with RSA or ECDSA (or
+    ML-DSA), so Ed25519/Ed448/DSA keys are unusable even if the CA would
+    happily sign them. Undersized RSA is rejected on strength grounds.
+    """
+
+    key_type: str
+    reason: str
+
+
+# =============================================================================
+# Key Store Errors
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class KeyAlreadyExistsError:
+    """A key already exists for this label and overwrite was not requested.
+
+    Overwriting silently would strand the previously issued certificate,
+    which stays valid against the trust anchor until it expires (there is
+    no revocation), so this is deliberately opt-in.
+    """
+
+    backend: str
+    label: str
+    location: str
+
+
+@dataclass(frozen=True, slots=True)
+class KeyNotFoundError:
+    """No key exists for this label in the given store."""
+
+    backend: str
+    label: str
+    location: str
+
+
+@dataclass(frozen=True, slots=True)
+class KeyStoreOperationError:
+    """A key store operation failed."""
+
+    backend: str
+    operation: str
+    reason: str
+
+
+# =============================================================================
 # Storage Errors
 # =============================================================================
 
@@ -397,3 +471,7 @@ type HostError = (
 )
 type OffboardError = NotInitializedError | HostNotFoundError | StackDeleteError
 type SecretsError = SecretsManagerReadError | SOPSEncryptError | SecretsFileExistsError
+type CsrError = CsrParseError | CsrInvalidSignatureError | CsrUnsupportedKeyError
+type KeyStoreError = (
+    KeyAlreadyExistsError | KeyNotFoundError | KeyStoreOperationError | CsrParseError
+)
