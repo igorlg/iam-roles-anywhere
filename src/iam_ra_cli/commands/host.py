@@ -23,9 +23,11 @@ from iam_ra_cli.workflows import list_hosts, offboard
 from iam_ra_cli.workflows.enrol import (
     ApproveConfig,
     EnrolConfig,
+    InstallConfig,
     RequestConfig,
     approve_certificate,
     enrol_host,
+    install_certificate,
     request_certificate,
 )
 from iam_ra_cli.workflows.host import (
@@ -35,6 +37,50 @@ from iam_ra_cli.workflows.host import (
     add_role,
     remove_role,
 )
+
+
+def _render_certificate_stanza(
+    credential_source: CredentialSource | None, *, indent: int = 2
+) -> list[str]:
+    """Build the `certificate = { ... }` stanza for a credential source.
+
+    Shared by `host enroll` and `host install` so the two cannot drift: both
+    must emit the tagged-union shape the Nix module expects, where `source`
+    selects which of the remaining fields are read.
+    """
+    pad = " " * indent
+    field = " " * (indent + 2)
+    lines = [f"{pad}certificate = {{"]
+
+    match credential_source:
+        case FileCredentialSource(certificate_path, private_key_path):
+            lines.extend(
+                [
+                    f'{field}source   = "files";',
+                    f'{field}certPath = "{certificate_path}";',
+                    f'{field}keyPath  = "{private_key_path}";',
+                ]
+            )
+        case KeychainCredentialSource(subject_common_name, _keychain_path):
+            lines.extend(
+                [
+                    f'{field}source = "macosKeychain";',
+                    f'{field}selector.subject = "CN={subject_common_name}";',
+                ]
+            )
+        case None:
+            # Split flow: the certificate has not been installed on this
+            # machine, so we cannot know the final paths.
+            lines.extend(
+                [
+                    f'{field}source   = "files";',
+                    f'{field}certPath = "/path/to/cert.pem";  # from `iam-ra host install`',
+                    f'{field}keyPath  = "/path/to/key.pem";',
+                ]
+            )
+
+    lines.append(f"{pad}}};")
+    return lines
 
 
 def _render_enrol_nix_snippet(
@@ -56,39 +102,10 @@ def _render_enrol_nix_snippet(
         "programs.iamRolesAnywhere = {",
         "  enable = true;",
         f"  identities.{scope} = {{",
-        "    certificate = {",
     ]
-
-    match credential_source:
-        case FileCredentialSource(certificate_path, private_key_path):
-            lines.extend(
-                [
-                    '      source   = "files";',
-                    f'      certPath = "{certificate_path}";',
-                    f'      keyPath  = "{private_key_path}";',
-                ]
-            )
-        case KeychainCredentialSource(subject_common_name, _keychain_path):
-            lines.extend(
-                [
-                    '      source = "macosKeychain";',
-                    f'      selector.subject = "CN={subject_common_name}";',
-                ]
-            )
-        case None:
-            # Split flow: the certificate has not been installed on this
-            # machine, so we cannot know the final paths.
-            lines.extend(
-                [
-                    '      source   = "files";',
-                    '      certPath = "/path/to/cert.pem";  # from `iam-ra host request`',
-                    '      keyPath  = "/path/to/key.pem";',
-                ]
-            )
-
+    lines.extend(_render_certificate_stanza(credential_source, indent=4))
     lines.extend(
         [
-            "    };",
             f'    trustAnchorArn = "{trust_anchor_arn}";',
             f'    region = "{region}";',
             "    profiles = {",
@@ -373,11 +390,11 @@ def host_remove_role(
 # =============================================================================
 
 
-def _read_csr(csr: str) -> str:
-    """Read a CSR from a file path, or from stdin when given '-'."""
-    if csr == "-":
+def _read_pem(source: str) -> str:
+    """Read a PEM document from a file path, or from stdin when given '-'."""
+    if source == "-":
         return sys.stdin.read()
-    return Path(csr).read_text()
+    return Path(source).read_text()
 
 
 def _write_or_echo(content: str, out: str | None, *, label: str, as_json: bool) -> None:
@@ -445,8 +462,9 @@ def host_request(
     Only the CSR is emitted, which is public data - paste it, commit it, or
     email it without a secure channel.
 
-    Hand the CSR to whoever holds the CA and have them run
-    `iam-ra host approve`, then install the certificate they return.
+    Hand the CSR to whoever holds the CA and have them run `iam-ra host
+    approve`, then install the certificate they return with
+    `iam-ra host install`.
 
     \b
     Examples:
@@ -495,6 +513,122 @@ def host_request(
     click.secho("Next: have the CA holder run", bold=True, err=True)
     click.echo(
         f"  iam-ra host approve {result.hostname} --role <role> --csr <this-csr>",
+        err=True,
+    )
+    click.secho("Then install the certificate they return, back on this host:", bold=True, err=True)
+    click.echo(
+        f"  iam-ra host install {result.hostname} --certificate <returned-cert>",
+        err=True,
+    )
+
+
+@host.command("install")
+@click.argument("hostname")
+@click.option(
+    "--certificate",
+    "-c",
+    required=True,
+    help="Path to the certificate from `iam-ra host approve`, or '-' for stdin.",
+)
+@namespace_option
+@click.option(
+    "--scope",
+    "-s",
+    default="default",
+    show_default=True,
+    help=(
+        "CA scope this host was approved under. Must match the scope passed to "
+        "`iam-ra host request`, since it selects which local key to pair with."
+    ),
+)
+@click.option(
+    "--key-store",
+    type=click.Choice(["files", "macosKeychain"]),
+    default="files",
+    show_default=True,
+    help="Where this host's private key was generated. Must match `host request`.",
+)
+@json_option
+def host_install(
+    hostname: str,
+    certificate: str,
+    namespace: str,
+    scope: str,
+    key_store: str,
+    as_json: bool,
+) -> None:
+    """Install a signed certificate next to the key that was generated for it.
+
+    Run this ON THE HOST, to finish what `iam-ra host request` started. Like
+    request, it needs no AWS credentials and makes no AWS calls - a signed
+    certificate is public, and pairing it with the local key is a local
+    operation.
+
+    The certificate is refused unless its public key matches the key this host
+    is holding, so a certificate meant for another host, or one superseded by a
+    later `host request`, cannot be installed by mistake.
+
+    After this the host has a complete identity. Add the printed `certificate`
+    block to its Nix configuration, along with the trust anchor and profile ARNs
+    from `iam-ra host approve`.
+
+    \b
+    Examples:
+      iam-ra host install web01 --certificate web01.pem
+      iam-ra host install web01 -c - < web01.pem
+      iam-ra host install mbp -c mbp.pem --key-store macosKeychain
+    """
+    certificate_pem = _read_pem(certificate)
+
+    result = handle_result(
+        install_certificate(
+            InstallConfig(
+                namespace=namespace,
+                certificate_pem=certificate_pem,
+                scope=scope,
+                key_store=key_store,  # type: ignore[arg-type]
+            )
+        ),
+        as_json=as_json,
+    )
+
+    if as_json:
+        payload: dict[str, object] = {
+            "hostname": hostname,
+            "namespace": result.namespace,
+            "scope": result.scope,
+            "label": result.label,
+            "key_store": result.key_store,
+            "certificate": {
+                "serial": result.certificate.serial,
+                "not_before": result.certificate.not_before,
+                "not_after": result.certificate.not_after,
+                "subject_common_name": result.certificate.subject_common_name,
+            },
+        }
+        match result.credential_source:
+            case FileCredentialSource(certificate_path, private_key_path):
+                payload["certificate_path"] = str(certificate_path)
+                payload["private_key_path"] = str(private_key_path)
+            case KeychainCredentialSource(subject_common_name, keychain_path):
+                payload["keychain_subject"] = subject_common_name
+                payload["keychain_path"] = str(keychain_path)
+        click.echo(render_json(payload))
+        return
+
+    click.secho("Certificate installed.", fg="green", err=True)
+    echo_key_value("Subject CN", result.certificate.subject_common_name, indent=1, err=True)
+    echo_key_value("Serial", result.certificate.serial, indent=1, err=True)
+    echo_key_value("Expires", result.certificate.not_after, indent=1, err=True)
+    echo_key_value("Key store", result.key_store, indent=1, err=True)
+    click.echo(err=True)
+    click.secho("Add to this host's Nix configuration:", bold=True, err=True)
+    for line in _render_certificate_stanza(result.credential_source):
+        click.echo(line, err=True)
+    click.echo(err=True)
+    click.secho(
+        "Take trustAnchorArn, region and the profile ARNs from the `iam-ra host approve` output.",
+        dim=True,
         err=True,
     )
 
@@ -586,7 +720,7 @@ def host_approve(
                 role_names.append(name)
 
     try:
-        csr_pem = _read_csr(csr)
+        csr_pem = _read_pem(csr)
     except OSError as e:
         raise click.ClickException(f"Could not read CSR: {e}") from e
 
@@ -659,6 +793,18 @@ def host_approve(
         credential_source=None,
     ):
         click.echo(f"  {line}", err=True)
+    click.echo(err=True)
+    click.secho("Return the certificate to the host, then run there:", bold=True, err=True)
+    click.echo(
+        f"  iam-ra host install {result.host.hostname} --certificate <this-cert>",
+        err=True,
+    )
+    click.secho(
+        "  That fills in the certPath/keyPath above, or switches the stanza to "
+        "the keychain selector.",
+        dim=True,
+        err=True,
+    )
 
 
 @host.command("enroll")

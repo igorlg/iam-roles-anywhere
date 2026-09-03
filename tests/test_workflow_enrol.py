@@ -1,4 +1,4 @@
-"""Tests for workflows/enrol.py - request / approve / enrol.
+"""Tests for workflows/enrol.py - request / install / approve / enrol.
 
 The properties worth protecting here are security properties, not just
 plumbing:
@@ -37,9 +37,11 @@ from iam_ra_cli.models import CA, Arn, CAMode, Host, Init, NamespaceInfo, Role, 
 from iam_ra_cli.workflows.enrol import (
     ApproveConfig,
     EnrolConfig,
+    InstallConfig,
     RequestConfig,
     approve_certificate,
     enrol_host,
+    install_certificate,
     request_certificate,
 )
 
@@ -214,9 +216,7 @@ class TestRequestCertificate:
         assert "ctx" not in params
 
     def test_generates_key_and_returns_csr(self, xdg: Path) -> None:
-        result = _unwrap(
-            request_certificate(RequestConfig(namespace="test", hostname="web01"))
-        )
+        result = _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
 
         assert result.csr_pem.startswith("-----BEGIN CERTIFICATE REQUEST-----")
         assert result.label == "test-default"
@@ -224,17 +224,13 @@ class TestRequestCertificate:
         assert _store(xdg).has_key("test-default")
 
     def test_result_carries_no_private_key(self, xdg: Path) -> None:
-        result = _unwrap(
-            request_certificate(RequestConfig(namespace="test", hostname="web01"))
-        )
+        result = _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
 
         for f in dataclasses.fields(result):
             assert "PRIVATE KEY" not in str(getattr(result, f.name))
 
     def test_csr_matches_the_stored_key(self, xdg: Path) -> None:
-        result = _unwrap(
-            request_certificate(RequestConfig(namespace="test", hostname="web01"))
-        )
+        result = _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
 
         csr = x509.load_pem_x509_csr(result.csr_pem.encode())
         stored = serialization.load_pem_private_key(
@@ -247,9 +243,7 @@ class TestRequestCertificate:
 
     def test_scope_is_reflected_in_the_label(self, xdg: Path) -> None:
         result = _unwrap(
-            request_certificate(
-                RequestConfig(namespace="test", hostname="web01", scope="other")
-            )
+            request_certificate(RequestConfig(namespace="test", hostname="web01", scope="other"))
         )
 
         assert result.label == "test-other"
@@ -266,9 +260,7 @@ class TestRequestCertificate:
     def test_overwrite_regenerates(self, xdg: Path) -> None:
         first = _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
         second = _unwrap(
-            request_certificate(
-                RequestConfig(namespace="test", hostname="web01", overwrite=True)
-            )
+            request_certificate(RequestConfig(namespace="test", hostname="web01", overwrite=True))
         )
 
         assert first.csr_pem != second.csr_pem
@@ -293,6 +285,165 @@ class TestRequestCertificate:
                 pass
             case Ok(_):
                 pytest.fail("an unknown backend should fail")
+
+
+# =============================================================================
+# install
+# =============================================================================
+
+
+class TestInstallCertificate:
+    """`install` is the second half of the split flow, and also host-side.
+
+    Without it, `request` and `approve` cannot actually produce a working host:
+    the signed certificate has nowhere to go. These tests pin the properties
+    that make it safe to run on a machine with no AWS access.
+    """
+
+    def _sign(self, csr_pem: str, hostname: str = "web01") -> str:
+        ca = crypto.generate_ca("Test CA")
+        return _unwrap(crypto.sign_csr(csr_pem, ca.certificate, ca.private_key, hostname, 30))
+
+    def test_takes_no_aws_context(self) -> None:
+        """Same guarantee as `request`: enforced by the signature, not a comment."""
+        params = inspect.signature(install_certificate).parameters
+
+        assert list(params) == ["config"]
+        assert "ctx" not in params
+
+    def test_installs_the_certificate_against_the_waiting_key(self, xdg: Path) -> None:
+        req = _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
+        store = _store(xdg)
+        assert not store.certificate_path("test-default").exists()
+
+        result = _unwrap(
+            install_certificate(
+                InstallConfig(namespace="test", certificate_pem=self._sign(req.csr_pem))
+            )
+        )
+
+        assert store.certificate_path("test-default").exists()
+        assert result.label == "test-default"
+        assert result.certificate.subject_common_name == "web01"
+        assert isinstance(result.credential_source, FileCredentialSource)
+
+    def test_installed_certificate_matches_the_stored_key(self, xdg: Path) -> None:
+        """The whole point: the pair on disk must actually be a usable identity."""
+        req = _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
+        _unwrap(
+            install_certificate(
+                InstallConfig(namespace="test", certificate_pem=self._sign(req.csr_pem))
+            )
+        )
+
+        store = _store(xdg)
+        cert = x509.load_pem_x509_certificate(store.certificate_path("test-default").read_bytes())
+        key = serialization.load_pem_private_key(
+            store.key_path("test-default").read_bytes(), password=None
+        )
+        spki = serialization.PublicFormat.SubjectPublicKeyInfo
+        assert cert.public_key().public_bytes(
+            serialization.Encoding.DER, spki
+        ) == key.public_key().public_bytes(serialization.Encoding.DER, spki)
+
+    def test_reports_serial_and_expiry(self, xdg: Path) -> None:
+        req = _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
+
+        result = _unwrap(
+            install_certificate(
+                InstallConfig(namespace="test", certificate_pem=self._sign(req.csr_pem))
+            )
+        )
+
+        assert result.certificate.serial == result.certificate.serial.upper()
+        assert not result.certificate.serial.startswith("0")
+        assert result.certificate.not_after > result.certificate.not_before
+
+    def test_refuses_a_certificate_for_a_different_key(self, xdg: Path) -> None:
+        """A certificate issued to another host must not install here.
+
+        Otherwise an attacker who can drop a file on the host, or an admin who
+        mixes up two PEMs during a bulk migration, silently produces a
+        cert/key pair that cannot authenticate - failing at credential time
+        with no clue why.
+        """
+        _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
+        foreign_csr = crypto.build_csr(crypto.generate_private_key(), "web01")
+
+        match install_certificate(
+            InstallConfig(namespace="test", certificate_pem=self._sign(foreign_csr))
+        ):
+            case Err(e):
+                assert "does not match" in e.reason
+            case Ok(_):
+                pytest.fail("a certificate for a different key must be refused")
+
+    def test_refuses_a_certificate_superseded_by_a_new_request(self, xdg: Path) -> None:
+        """Re-requesting rotates the key, which must invalidate the older cert."""
+        first = _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
+        stale = self._sign(first.csr_pem)
+        _unwrap(
+            request_certificate(RequestConfig(namespace="test", hostname="web01", overwrite=True))
+        )
+
+        match install_certificate(InstallConfig(namespace="test", certificate_pem=stale)):
+            case Err(e):
+                assert "does not match" in e.reason
+            case Ok(_):
+                pytest.fail("a certificate for the superseded key must be refused")
+
+    def test_fails_when_no_key_was_requested(self, xdg: Path) -> None:
+        other = _unwrap(request_certificate(RequestConfig(namespace="other", hostname="web01")))
+
+        match install_certificate(
+            InstallConfig(namespace="test", certificate_pem=self._sign(other.csr_pem))
+        ):
+            case Err(_):
+                pass
+            case Ok(_):
+                pytest.fail("installing without a prior request must fail")
+
+    def test_rejects_a_malformed_certificate(self, xdg: Path) -> None:
+        _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
+
+        match install_certificate(
+            InstallConfig(namespace="test", certificate_pem="not a certificate")
+        ):
+            case Err(_):
+                pass
+            case Ok(_):
+                pytest.fail("a malformed certificate must be refused")
+
+    def test_scope_selects_which_key_to_pair_with(self, xdg: Path) -> None:
+        _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
+        other = _unwrap(
+            request_certificate(RequestConfig(namespace="test", hostname="web01", scope="other"))
+        )
+
+        result = _unwrap(
+            install_certificate(
+                InstallConfig(
+                    namespace="test",
+                    certificate_pem=self._sign(other.csr_pem),
+                    scope="other",
+                )
+            )
+        )
+
+        assert result.label == "test-other"
+        assert not _store(xdg).certificate_path("test-default").exists()
+
+    def test_result_carries_no_private_key(self, xdg: Path) -> None:
+        req = _unwrap(request_certificate(RequestConfig(namespace="test", hostname="web01")))
+
+        result = _unwrap(
+            install_certificate(
+                InstallConfig(namespace="test", certificate_pem=self._sign(req.csr_pem))
+            )
+        )
+
+        for f in dataclasses.fields(result):
+            assert "PRIVATE KEY" not in str(getattr(result, f.name))
 
 
 # =============================================================================
@@ -741,9 +892,7 @@ class TestEnrolHost:
         state.hosts["mbp"] = Host(hostname="mbp", role_names=("admin",))
         put_state(state)
 
-        match enrol_host(
-            ctx, EnrolConfig(namespace="test", hostname="mbp", role_names=("admin",))
-        ):
+        match enrol_host(ctx, EnrolConfig(namespace="test", hostname="mbp", role_names=("admin",))):
             case Err(e):
                 assert isinstance(e, HostAlreadyExistsError)
             case Ok(_):
@@ -755,9 +904,7 @@ class TestEnrolHost:
         ctx, _put, _ca, base = env
 
         first = _unwrap(
-            enrol_host(
-                ctx, EnrolConfig(namespace="test", hostname="mbp", role_names=("admin",))
-            )
+            enrol_host(ctx, EnrolConfig(namespace="test", hostname="mbp", role_names=("admin",)))
         )
         first_key = _store(base).key_path("test-default").read_text()
 

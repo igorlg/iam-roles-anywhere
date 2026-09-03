@@ -1,18 +1,21 @@
-"""Enrolment workflows - request, approve, enrol.
+"""Enrolment workflows - request, install, approve, enrol.
 
 The v3 replacement for `host onboard`. The private key is generated on the host
 that will use it and never leaves; only a CSR and a certificate move, and both
 are public.
 
-Three verbs, deliberately distinct rather than flags on one command, because
+Four verbs, deliberately distinct rather than flags on one command, because
 their preconditions genuinely differ:
 
 ``request``  Runs on the host. Generates a key in a KeyStore and emits a CSR.
              **Takes no AwsContext** - it needs no AWS credentials at all, and
              the signature enforces that rather than merely documenting it.
+``install``  Runs on the host, to finish what ``request`` started: pairs the
+             returned certificate with the waiting key. Also takes no
+             AwsContext.
 ``approve``  Runs wherever the CA lives (the admin workstation for a
              self-signed CA). Validates and signs a CSR, records the host.
-``enrol``    Both halves in one process, for the common case where the machine
+``enrol``    All three in one process, for the common case where the machine
              that needs credentials is also the one with AWS access.
 """
 
@@ -26,6 +29,7 @@ from iam_ra_cli.lib.crypto import CertificateInfo, inspect_certificate
 from iam_ra_cli.lib.errors import (
     AccountMismatchError,
     CAScopeNotFoundError,
+    CsrParseError,
     HostAlreadyExistsError,
     KeyStoreError,
     NotInitializedError,
@@ -41,6 +45,8 @@ from iam_ra_cli.operations.enrol import SignHostCsrError, sign_host_csr
 from iam_ra_cli.workflows.host import RoleProfile
 
 type RequestError = KeyStoreError
+
+type InstallError = KeyStoreError | CsrParseError
 
 type ApproveError = (
     NotInitializedError
@@ -121,6 +127,82 @@ def request_certificate(config: RequestConfig) -> Result[RequestResult, RequestE
             label=label,
             key_store=config.key_store,
             csr_pem=enrolment_request.csr_pem,
+        )
+    )
+
+
+# =============================================================================
+# install - runs on the host, no AWS access
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class InstallConfig:
+    """Inputs for installing a signed certificate alongside its key.
+
+    The counterpart to ``request``: it completes the split flow on the host.
+    Like ``request`` it takes no ``AwsContext``, because a signed certificate is
+    public data and pairing it with the local key needs no AWS call.
+
+    ``scope`` must match the one passed to ``request``, since together with
+    ``namespace`` it forms the KeyStore label that locates the waiting key.
+    """
+
+    namespace: str
+    certificate_pem: str
+    scope: str = "default"
+    key_store: KeyStoreBackend = "files"
+    # Test seam: override where the files backend puts keys.
+    key_store_root: Path | None = None
+
+
+@dataclass(frozen=True)
+class InstallResult:
+    """Where the installed identity lives, and what it says."""
+
+    namespace: str
+    scope: str
+    label: str
+    key_store: str
+    certificate: CertificateInfo
+    credential_source: CredentialSource
+
+
+def install_certificate(config: InstallConfig) -> Result[InstallResult, InstallError]:
+    """Install a signed certificate against the key already in the host's store.
+
+    The store rejects a certificate whose public key does not match the key it
+    holds, so a certificate for a different host - or one superseded by a newer
+    ``request`` - cannot be installed by mistake.
+    """
+    match keystore_module.get_keystore(config.key_store, root=config.key_store_root):
+        case Err(e):
+            return Err(e)
+        case Ok(store):
+            pass
+
+    label = make_label(config.namespace, config.scope)
+
+    match inspect_certificate(config.certificate_pem):
+        case Err(e):
+            return Err(e)
+        case Ok(cert_info):
+            pass
+
+    match store.install_certificate(label, config.certificate_pem):
+        case Err(e):
+            return Err(e)
+        case Ok(credential_source):
+            pass
+
+    return Ok(
+        InstallResult(
+            namespace=config.namespace,
+            scope=config.scope,
+            label=label,
+            key_store=config.key_store,
+            certificate=cert_info,
+            credential_source=credential_source,
         )
     )
 

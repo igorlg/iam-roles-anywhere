@@ -2,7 +2,12 @@
 
 from iam_ra_cli.workflows.ca import delete_scope, list_cas, setup_ca
 from iam_ra_cli.workflows.destroy import destroy
-from iam_ra_cli.workflows.enrol import approve_certificate, enrol_host, request_certificate
+from iam_ra_cli.workflows.enrol import (
+    approve_certificate,
+    enrol_host,
+    install_certificate,
+    request_certificate,
+)
 from iam_ra_cli.workflows.host import list_hosts, offboard
 from iam_ra_cli.workflows.init import init
 from iam_ra_cli.workflows.migrate import migrate
@@ -20,6 +25,7 @@ __all__ = [
     "list_roles",
     # enrolment (v3)
     "request_certificate",
+    "install_certificate",
     "approve_certificate",
     "enrol_host",
     # host lifecycle

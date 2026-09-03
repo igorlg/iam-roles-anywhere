@@ -275,21 +275,174 @@ is why v3 makes re-enrolment cheap enough to run on a timer.
 
 ## Migration path
 
-Re-enrolment. There is no in-place upgrade.
+Re-enrolment. There is no in-place upgrade, because the whole point of v3 is that the private key is
+generated somewhere v2 could not reach — on the host. No amount of state rewriting produces a key
+that was never escrowed.
 
-<!-- TODO: fill in concrete steps as each task lands.
-     Required content:
-       1. inventory existing hosts (`iam-ra host list`)
-       2. offboard, or run v2 and v3 side by side during transition
-       3. per-host: `iam-ra host enroll` (or request/approve)
-       4. update Nix config to the new certificate option shape
-       5. remove now-unnecessary sops.secrets entries for cert/key
-       6. verify with `aws sts get-caller-identity --profile <name>`
-       7. clean up: delete v2 host stacks and Secrets Manager secrets
-     Also document:
-       - state schema v3 -> v4 auto-migration behaviour
-       - what happens to certs issued under v2 (still valid until expiry unless a CRL is imported)
--->
+The good news is that the migration is **incremental and non-disruptive**. Your namespace, trust
+anchors, CA and roles are all untouched by v3; only the per-host key and certificate change. A v2
+host and a v3 host can coexist under the same trust anchor indefinitely, so you can migrate one host
+at a time and roll back a single host without affecting any other.
+
+Nothing about the state file needs preparing: v3 state documents load into v4 unchanged (see
+[State schema v4](#state-schema-v4)). Upgrading the CLI is safe on its own.
+
+### 0. Upgrade the CLI, then take an inventory
+
+```bash
+iam-ra --version          # expect 3.x
+iam-ra host list
+iam-ra status --json | jq '.hosts'
+```
+
+Hosts reported with `legacy_managed_key: true` are the ones to migrate — their private key was
+generated on the admin workstation and still exists in S3, Secrets Manager and your SOPS files.
+
+### 1. Re-enrol one host
+
+Pick the migration flow that matches the host:
+
+**The host has AWS credentials** (typical for a workstation) — one command, on the host:
+
+```bash
+iam-ra host enroll web01 --role deploy --overwrite
+```
+
+**The host has no AWS access** (typical for a server or CI box) — two commands, two machines:
+
+```bash
+# On the host. Needs no AWS credentials, makes no AWS calls.
+iam-ra host request web01 --out web01.csr
+
+# Copy web01.csr to the admin workstation. It is public data - email it,
+# paste it, commit it. There is no secure channel to arrange.
+iam-ra host approve web01 --role deploy --csr web01.csr --out web01.pem --overwrite
+
+# Copy web01.pem back to the host and install it. Also public data.
+iam-ra host install web01 --certificate web01.pem
+```
+
+`--overwrite` is required for both, since the host already exists in state from v2. It replaces the
+recorded certificate; it does **not** revoke the old one (see [Revocation](#revocation)).
+
+Add `--key-store macosKeychain` on macOS to get a non-extractable key. See [Key stores](#key-stores).
+
+### 2. Update that host's Nix configuration
+
+Both commands print the exact snippet to paste. The shape changes from a flat `certPath`/`keyPath`
+pair to a tagged union under `certificate.source` — see
+[Nix module: certificate options](#nix-module-certificate-options) for the full option reference.
+
+For `--key-store files`:
+
+```nix
+programs.iamRolesAnywhere = {
+  enable = true;
+  identities.default = {
+    certificate = {
+      source   = "files";
+      certPath = "/Users/alice/.local/state/iam-ra/keys/default-default/cert.pem";
+      keyPath  = "/Users/alice/.local/state/iam-ra/keys/default-default/key.pem";
+    };
+    trustAnchorArn = "arn:aws:rolesanywhere:...";
+    region = "ap-southeast-2";
+    profiles.deploy = { profileArn = "..."; roleArn = "..."; };
+  };
+};
+```
+
+For `--key-store macosKeychain`:
+
+```nix
+certificate = {
+  source = "macosKeychain";
+  selector.subject = "CN=web01";
+};
+```
+
+Then rebuild as usual (`nixos-rebuild switch`, `darwin-rebuild switch`, or `home-manager switch`).
+
+### 3. Drop the SOPS wiring for that host
+
+This is the step that pays for the migration. Delete the cert and key entries:
+
+```nix
+# DELETE - v3 has nothing to decrypt here.
+sops.secrets."iam-ra/cert".sopsFile = ./secrets/hosts/web01/iam-ra-default.yaml;
+sops.secrets."iam-ra/key".sopsFile  = ./secrets/hosts/web01/iam-ra-default.yaml;
+```
+
+The certificate is public and is now referenced by a plain path, and the private key never leaves the
+host. Once the host is verified, delete the SOPS file itself:
+
+```bash
+git rm secrets/hosts/web01/iam-ra-default.yaml
+```
+
+Note that deleting the file does not un-leak the key it held. Anything with a copy of that repo, or
+of its history, still has the v2 key. That key is only truly retired once the certificate it belongs
+to has expired or been placed on an imported CRL.
+
+### 4. Verify
+
+```bash
+aws sts get-caller-identity --profile deploy
+```
+
+You should see the role ARN and, in `UserId`, the certificate serial. To check what identity the
+credential helper actually selected:
+
+```bash
+# files backend
+openssl x509 -in ~/.local/state/iam-ra/keys/default-default/cert.pem -noout -subject -dates
+
+# macosKeychain backend
+security find-identity ~/Library/Keychains/iam-ra.keychain
+```
+
+If this fails, the host's v2 configuration is still intact until you complete step 5 — revert the Nix
+change and rebuild to roll back.
+
+### 5. Tear down the v2 AWS resources for that host
+
+Only once the host is verified. v2 left a per-host CloudFormation stack, S3 objects and Secrets
+Manager secrets; v3 creates none of these.
+
+```bash
+aws cloudformation delete-stack --stack-name iam-ra-default-host-web01
+```
+
+`iam-ra host offboard` is not the right tool here: it also removes the host from state, and you want
+the host to stay. Delete the stack directly. It owns the Secrets Manager secrets and is the only
+thing that referenced the S3 objects, so removing it cleans up both.
+
+Confirm nothing is left holding the old key:
+
+```bash
+aws secretsmanager list-secrets \
+  --query "SecretList[?starts_with(Name, '/iam-ra/default/hosts/web01')].Name"
+```
+
+### 6. Repeat, then confirm the namespace is clean
+
+```bash
+iam-ra status --json | jq '[.hosts[] | select(.legacy_managed_key == true) | .hostname]'
+```
+
+An empty array means every host now holds a key that was generated in place and has never been
+transmitted. At that point the v2 key-escrow chain described in
+[Why v3 is a breaking change](#why-v3-is-a-breaking-change) no longer exists anywhere in your
+deployment.
+
+### What about certificates issued under v2?
+
+They remain valid against the trust anchor until they expire. Re-enrolling a host does not invalidate
+its old certificate, and neither does offboarding it or deleting its stack — so during migration a
+host legitimately has two working certificates, and an attacker holding a leaked v2 key has one too.
+
+Close that window in one of two ways: import a CRL covering the old certificates, or wait out their
+validity (365 days by default, which is why v3 recommends far shorter lifetimes). See
+[Revocation](#revocation).
 
 ## Notes carried over from design
 
