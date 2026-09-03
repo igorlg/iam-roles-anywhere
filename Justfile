@@ -78,6 +78,18 @@ cfn-lint:
     uv run cfn-lint src/iam_ra_cli/data/cloudformation/*.yaml
 
 # ===================
+# DOCS
+# ===================
+
+# Lint Markdown against .markdownlint.json
+md-lint:
+    nix run nixpkgs#markdownlint-cli -- $(git ls-files '*.md')
+
+# Fix auto-fixable Markdown issues
+md-fix:
+    nix run nixpkgs#markdownlint-cli -- --fix $(git ls-files '*.md')
+
+# ===================
 # VERSIONING
 # ===================
 
@@ -111,13 +123,10 @@ update-input input:
 
 # Remove build artifacts
 clean:
-    rm -rf result
-    rm -rf .venv
+    find . -type d -name __pycache__ -exec rm -rf {} \; 2>/dev/null
+    rm -rf result dist .venv .mypy_cache .pytest_cache .ruff_cache
     rm -rf *.egg-info
     rm -rf src/*.egg-info
-    rm -rf .mypy_cache
-    rm -rf .pytest_cache
-    rm -rf .ruff_cache
 
 # Garbage collect Nix store
 gc:
