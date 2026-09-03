@@ -44,10 +44,6 @@ from iam_ra_cli.lib.errors import (
     RoleInUseError,
     RoleNotFoundError,
     RoleScopeMismatchError,
-    SecretsFileExistsError,
-    SecretsManagerReadError,
-    SOPSEncryptError,
-    SopsPathConflictError,
     StackDeleteError,
     StackDeployError,
     StateLoadError,
@@ -300,24 +296,6 @@ def _format_error(error: Any) -> str:
 
         case StateSaveError(namespace, reason):
             return f"Failed to save state for '{namespace}': {reason}"
-
-        case SecretsManagerReadError(secret_arn, reason):
-            return f"Failed to read secret '{secret_arn}': {reason}"
-
-        case SOPSEncryptError(path, reason):
-            return f"SOPS encryption failed for '{path}': {reason}"
-
-        case SecretsFileExistsError(path):
-            return f"Secrets file already exists: {path}"
-
-        case SopsPathConflictError(namespace, hostnames):
-            hosts_str = ", ".join(hostnames)
-            return (
-                f"Can't migrate SOPS paths in namespace '{namespace}': the "
-                f"following hosts have BOTH the legacy 'iam-ra.yaml' and the "
-                f"canonical 'iam-ra-{namespace}.yaml' present: {hosts_str}. "
-                f"Resolve manually (delete whichever is outdated) then rerun."
-            )
 
         case PCADescribeError(pca_arn, reason):
             return f"Failed to describe ACM Private CA '{pca_arn}': {reason}"

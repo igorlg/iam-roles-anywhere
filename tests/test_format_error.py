@@ -6,7 +6,6 @@ Every error type gets its own test to catch:
 - Missing case arms (falls through to generic str())
 """
 
-from pathlib import Path
 
 from iam_ra_cli.commands.common import _format_error
 from iam_ra_cli.lib.errors import (
@@ -29,9 +28,6 @@ from iam_ra_cli.lib.errors import (
     RoleAlreadyExistsError,
     RoleInUseError,
     RoleNotFoundError,
-    SecretsFileExistsError,
-    SecretsManagerReadError,
-    SOPSEncryptError,
     StackDeleteError,
     StackDeployError,
     StateLoadError,
@@ -213,38 +209,6 @@ class TestFormatStateErrors:
         ns_pos = result.index("my-ns")
         reason_pos = result.index("my-reason")
         assert ns_pos < reason_pos, "namespace should appear before reason in the message"
-
-
-class TestFormatSecretsErrors:
-    """Tests for secrets error formatting.
-
-    Regression: SecretsError is a type alias (union), not a class.
-    Each concrete type must have its own case arm.
-    """
-
-    def test_secrets_manager_read_error(self) -> None:
-        error = SecretsManagerReadError(
-            secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:my-secret",
-            reason="Access denied",
-        )
-        result = _format_error(error)
-        assert "my-secret" in result
-        assert "Access denied" in result
-
-    def test_sops_encrypt_error(self) -> None:
-        error = SOPSEncryptError(
-            path=Path("/home/user/.secrets/host.yaml"),
-            reason="KMS key not found",
-        )
-        result = _format_error(error)
-        assert "host.yaml" in result
-        assert "KMS key not found" in result
-
-    def test_secrets_file_exists_error(self) -> None:
-        error = SecretsFileExistsError(path=Path("/home/user/.secrets/host.yaml"))
-        result = _format_error(error)
-        assert "host.yaml" in result
-        assert "already exists" in result
 
 
 class TestFormatPCAErrors:

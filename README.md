@@ -249,7 +249,6 @@ Commands:
   init      Initialize IAM Roles Anywhere infrastructure
   destroy   Tear down all infrastructure for a namespace
   status    Show current status
-  migrate   Bring a namespace up to the current schema + file layout
   ca        Manage per-scope Certificate Authorities
     setup     Create a CA scope (CA + trust anchor)
     list      List CA scopes

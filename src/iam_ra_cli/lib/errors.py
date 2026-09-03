@@ -304,47 +304,6 @@ class SSMWriteError:
     reason: str
 
 
-@dataclass(frozen=True, slots=True)
-class SecretsManagerReadError:
-    """Failed to read from Secrets Manager."""
-
-    secret_arn: str
-    reason: str
-
-
-# =============================================================================
-# Secrets File Errors
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class SOPSEncryptError:
-    """SOPS encryption failed."""
-
-    path: Path
-    reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class SecretsFileExistsError:
-    """Secrets file already exists."""
-
-    path: Path
-
-
-@dataclass(frozen=True, slots=True)
-class SopsPathConflictError:
-    """SOPS path migration found hosts that have BOTH the legacy and the
-    canonical-namespaced SOPS file present.
-
-    This is ambiguous: the two files probably have different contents
-    (otherwise the user would just delete one). Tooling shouldn't guess.
-    The user resolves manually, then reruns the migration.
-    """
-
-    namespace: str
-    hostnames: tuple[str, ...]
-
 
 # =============================================================================
 # K8s Errors
@@ -490,7 +449,6 @@ type HostError = (
     | PCATimeoutError
 )
 type OffboardError = NotInitializedError | HostNotFoundError | StackDeleteError
-type SecretsError = SecretsManagerReadError | SOPSEncryptError | SecretsFileExistsError
 type CsrError = (
     CsrParseError | CsrInvalidSignatureError | CsrUnsupportedKeyError | CsrSubjectMismatchError
 )

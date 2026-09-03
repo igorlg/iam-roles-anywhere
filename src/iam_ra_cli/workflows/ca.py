@@ -138,7 +138,7 @@ def delete_scope(
     - State entry from cas[scope]
 
     Note: does NOT delete the S3 cert or local key. Those are left
-    for forensics/recovery. The migrate command handles full cleanup.
+    for forensics/recovery, and must be removed by hand.
 
     Args:
         ctx: AWS context

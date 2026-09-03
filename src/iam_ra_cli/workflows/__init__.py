@@ -10,7 +10,6 @@ from iam_ra_cli.workflows.enrol import (
 )
 from iam_ra_cli.workflows.host import list_hosts, offboard
 from iam_ra_cli.workflows.init import init
-from iam_ra_cli.workflows.migrate import migrate
 from iam_ra_cli.workflows.role import create_role, delete_role, list_roles
 from iam_ra_cli.workflows.status import get_status
 
@@ -32,5 +31,4 @@ __all__ = [
     "offboard",
     "list_hosts",
     "get_status",
-    "migrate",
 ]

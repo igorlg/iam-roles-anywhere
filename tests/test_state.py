@@ -249,8 +249,8 @@ class TestStateCache:
 # Loading old-version state files
 #
 # Users who upgrade iam-ra will have existing state files on S3 / in local
-# cache from previous versions. load() must transparently migrate them so no
-# manual `iam-ra migrate` is needed for the simple read path.
+# cache from previous versions. load() must transparently migrate them, so
+# reading old state needs no separate migration step.
 #
 # These fixtures are raw JSON strings (the on-disk shape of each version)
 # rather than constructed Python objects. That lets us test exactly what
