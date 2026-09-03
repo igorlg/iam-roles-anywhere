@@ -4,11 +4,13 @@
 # e.g. a `work` account and a `personal` account. Each account has its
 # own trust anchor, its own certificate, and its own set of profiles.
 #
-# Two identities = two certificates = two SOPS files. Each identity is
-# produced by running `iam-ra host onboard` under different AWS
-# credentials (AWS_PROFILE=work, AWS_PROFILE=personal), in different
-# `iam-ra` namespaces (--namespace work, --namespace personal). See
-# the multi-identity implementation plan in docs/ for the full story.
+# Two identities = two certificates = two key pairs. Each is enrolled by
+# running `iam-ra host enroll` under different AWS credentials
+# (AWS_PROFILE=work, AWS_PROFILE=personal), in different `iam-ra`
+# namespaces (--namespace work, --namespace personal).
+#
+# Both keys are generated on this laptop and neither leaves it, so there
+# is nothing to transport and no secrets manager to configure.
 #
 # Prerequisites (run ONCE per account, with matching AWS credentials):
 #
@@ -16,44 +18,20 @@
 #   AWS_PROFILE=work iam-ra init --namespace work
 #   AWS_PROFILE=work iam-ra role create admin    --namespace work --policy arn:aws:iam::aws:policy/AdministratorAccess
 #   AWS_PROFILE=work iam-ra role create readonly --namespace work --policy arn:aws:iam::aws:policy/ReadOnlyAccess
-#   AWS_PROFILE=work iam-ra host onboard laptop --namespace work --role admin --role readonly
+#   AWS_PROFILE=work iam-ra host enroll laptop --namespace work --role admin,readonly
 #
 #   # Personal account
 #   AWS_PROFILE=personal iam-ra init --namespace personal
 #   AWS_PROFILE=personal iam-ra role create personal-admin --namespace personal --policy arn:aws:iam::aws:policy/AdministratorAccess
-#   AWS_PROFILE=personal iam-ra host onboard laptop --namespace personal --role personal-admin
+#   AWS_PROFILE=personal iam-ra host enroll laptop --namespace personal --role personal-admin
 #
-# The CLI writes two SOPS files:
-#   - secrets/hosts/laptop/iam-ra-work.yaml     (work identity)
-#   - secrets/hosts/laptop/iam-ra-personal.yaml (personal identity)
+# The key store keys off namespace + scope, so the two identities land in
+# separate directories and cannot collide:
+#   ~/.local/state/iam-ra/keys/work-default/
+#   ~/.local/state/iam-ra/keys/personal-default/
 #
-# Copy both to your Nix flake's secrets/ directory and reference them
-# below.
-#
-{ config, ... }:
+{ ... }:
 {
-  # Two SOPS files - one per identity. Each keys its own certificate
-  # and private_key; no cross-identity sharing.
-  sops.secrets = {
-    "iam-ra/work/cert" = {
-      sopsFile = ./secrets/iam-ra-work.yaml;
-      key = "certificate";
-    };
-    "iam-ra/work/key" = {
-      sopsFile = ./secrets/iam-ra-work.yaml;
-      key = "private_key";
-    };
-
-    "iam-ra/personal/cert" = {
-      sopsFile = ./secrets/iam-ra-personal.yaml;
-      key = "certificate";
-    };
-    "iam-ra/personal/key" = {
-      sopsFile = ./secrets/iam-ra-personal.yaml;
-      key = "private_key";
-    };
-  };
-
   programs.iamRolesAnywhere = {
     enable = true;
     user = "alice";
@@ -64,8 +42,9 @@
       # ==========
       work = {
         certificate = {
-          certPath = config.sops.secrets."iam-ra/work/cert".path;
-          keyPath = config.sops.secrets."iam-ra/work/key".path;
+          source = "files";
+          certPath = "/home/alice/.local/state/iam-ra/keys/work-default/cert.pem";
+          keyPath = "/home/alice/.local/state/iam-ra/keys/work-default/key.pem";
         };
 
         trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:718758479978:trust-anchor/work-anchor";
@@ -90,8 +69,9 @@
       # ==========
       personal = {
         certificate = {
-          certPath = config.sops.secrets."iam-ra/personal/cert".path;
-          keyPath = config.sops.secrets."iam-ra/personal/key".path;
+          source = "files";
+          certPath = "/home/alice/.local/state/iam-ra/keys/personal-default/cert.pem";
+          keyPath = "/home/alice/.local/state/iam-ra/keys/personal-default/key.pem";
         };
 
         trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:987098549565:trust-anchor/personal-anchor";

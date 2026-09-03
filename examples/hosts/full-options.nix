@@ -8,11 +8,8 @@
 # cert, trust anchor, region, and set of profiles. Profiles within
 # an identity share the cert.
 #
-{ config, ... }:
+{ ... }:
 {
-  sops.secrets."iam-ra/cert".sopsFile = ./secrets/iam-ra-default.yaml;
-  sops.secrets."iam-ra/key".sopsFile = ./secrets/iam-ra-default.yaml;
-
   programs.iamRolesAnywhere = {
     enable = true;
     user = "alice";
@@ -20,9 +17,14 @@
     identities.default = {
       # Certificate configuration (shared across all profiles in this
       # identity).
+      #
+      # A tagged union: `source` selects which other fields are read.
+      # For "macosKeychain" see ./keychain.nix; for certificates from a
+      # secrets manager or an external PKI see ./external-secrets.nix.
       certificate = {
-        certPath = config.sops.secrets."iam-ra/cert".path;
-        keyPath = config.sops.secrets."iam-ra/key".path;
+        source = "files";
+        certPath = "/home/alice/.local/state/iam-ra/keys/default-default/cert.pem";
+        keyPath = "/home/alice/.local/state/iam-ra/keys/default-default/key.pem";
       };
 
       # AWS configuration for this identity

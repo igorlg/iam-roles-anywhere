@@ -12,21 +12,26 @@
 #   iam-ra role create admin    --policy arn:aws:iam::aws:policy/AdministratorAccess
 #   iam-ra role create readonly --policy arn:aws:iam::aws:policy/ReadOnlyAccess
 #   iam-ra role create deploy   --policy arn:aws:iam::123456789012:policy/DeployPolicy
-#   iam-ra host onboard workstation --role admin --role readonly --role deploy
+#   iam-ra host enroll workstation --role admin,readonly,deploy
 #
-{ config, ... }:
+# To grant a further role later:
+#   iam-ra host add-role workstation newrole
+# That issues NO new certificate - a certificate carries no role
+# information. It prints the ARNs to add to `profiles` below, and the
+# host cannot use the role until you add them here and rebuild.
+#
+{ ... }:
 {
-  sops.secrets."iam-ra/cert".sopsFile = ./secrets/iam-ra-default.yaml;
-  sops.secrets."iam-ra/key".sopsFile = ./secrets/iam-ra-default.yaml;
-
   programs.iamRolesAnywhere = {
     enable = true;
     user = "alice";
 
     identities.default = {
+      # One certificate, shared by every profile below.
       certificate = {
-        certPath = config.sops.secrets."iam-ra/cert".path;
-        keyPath = config.sops.secrets."iam-ra/key".path;
+        source = "files";
+        certPath = "/home/alice/.local/state/iam-ra/keys/default-default/cert.pem";
+        keyPath = "/home/alice/.local/state/iam-ra/keys/default-default/key.pem";
       };
 
       trustAnchorArn = "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/abc123";
