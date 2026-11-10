@@ -21,6 +21,7 @@ from iam_ra_cli.lib.errors import (
     StackDeployError,
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
+from iam_ra_cli.lib.storage.file import write_private_key
 from iam_ra_cli.lib.storage.s3 import write_object
 from iam_ra_cli.lib.templates import get_template_path
 from iam_ra_cli.models import Arn
@@ -97,10 +98,9 @@ def create_self_signed_ca(
         case Ok(_):
             pass
 
-    # Save CA private key locally
-    local_key_path.parent.mkdir(parents=True, exist_ok=True)
-    local_key_path.write_text(ca_keypair.private_key)
-    local_key_path.chmod(0o600)
+    # Save CA private key locally. It mints certificates for every host in the
+    # scope, so it is written owner-only from the moment it exists.
+    write_private_key(local_key_path, ca_keypair.private_key)
 
     # Deploy rootca stack
     template = _load_template(ROOTCA_SELF_SIGNED_TEMPLATE)

@@ -6,6 +6,7 @@ Tests cover:
 - CA deletion
 """
 
+import stat
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -163,6 +164,23 @@ class TestCreateSelfSignedCA:
         assert result.value.local_key_path.exists()
         key_content = result.value.local_key_path.read_text()
         assert "BEGIN" in key_content
+
+    def test_ca_key_is_not_readable_by_others(self, aws_env) -> None:
+        """The CA key mints certificates for every host, so its mode matters most."""
+        ctx, _tmp_path = aws_env
+
+        mock_outputs = {
+            "TrustAnchorArn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-1"
+        }
+        with patch("iam_ra_cli.operations.ca.deploy_stack", return_value=Ok(mock_outputs)):
+            result = create_self_signed_ca(ctx, "myns", "test-bucket")
+
+        assert isinstance(result, Ok)
+        key_path = result.value.local_key_path
+
+        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+        # 0700 on the directory means the key is not discoverable by listing.
+        assert stat.S_IMODE(key_path.parent.stat().st_mode) == 0o700
 
     def test_passes_scope_tag_to_cfn(self, aws_env) -> None:
         """Should include scope in CFN stack tags."""
