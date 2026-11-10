@@ -32,7 +32,6 @@ Backends
 
 import hashlib
 import json
-import os
 import re
 import secrets
 import shutil
@@ -53,6 +52,7 @@ from iam_ra_cli.lib.errors import (
     KeyStoreOperationError,
 )
 from iam_ra_cli.lib.result import Err, Ok, Result
+from iam_ra_cli.lib.storage.file import PRIVATE_KEY_DIR_MODE, write_private_key
 
 type KeyStoreBackend = Literal["files", "macosKeychain"]
 
@@ -63,10 +63,9 @@ type KeyStoreError = KeyAlreadyExistsError | KeyNotFoundError | KeyStoreOperatio
 # item label without escaping or traversal concerns.
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 
-# Private key: owner read/write only. Directory: owner-only, so the key is not
-# discoverable by listing even briefly.
-_KEY_FILE_MODE = 0o600
-_KEY_DIR_MODE = 0o700
+# Private-key file and directory modes live in storage.file, alongside the
+# writer that enforces them, so there is one definition rather than two.
+_KEY_DIR_MODE = PRIVATE_KEY_DIR_MODE
 # The certificate is public material; normal permissions are correct.
 _CERT_FILE_MODE = 0o644
 
@@ -192,8 +191,9 @@ class FileKeyStore:
         <root>/<label>/key.pem     0600, SEC1 EC private key
         <root>/<label>/cert.pem    0644, PEM certificate
 
-    The key is written via ``os.open`` with the mode supplied up front, so it is
-    never briefly readable by others - unlike write-then-``chmod``.
+    The key is written by ``storage.file.write_private_key``: a 0600 temp file
+    renamed into place, so it is never briefly readable by others - unlike
+    write-then-``chmod``.
 
     Unlike the ``macosKeychain`` backend the key here is extractable by anyone
     who can read the file. The security gain over v2 is narrower but still real:
@@ -243,24 +243,10 @@ class FileKeyStore:
         key_pem = crypto.serialize_private_key(private_key)
 
         try:
-            self._dir(label).mkdir(parents=True, exist_ok=True, mode=_KEY_DIR_MODE)
-            # mkdir's mode is subject to umask, and is a no-op if the directory
-            # already existed, so set it explicitly.
-            self._dir(label).chmod(_KEY_DIR_MODE)
-            # Open with the final mode so there is no window where the key file
-            # exists with broader permissions.
-            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _KEY_FILE_MODE)
-            try:
-                os.write(fd, key_pem.encode())
-            finally:
-                os.close(fd)
-            # Enforce the mode even if the file pre-existed with a laxer one.
-            key_path.chmod(_KEY_FILE_MODE)
+            write_private_key(key_path, key_pem)
         except OSError as e:
             return Err(
-                KeyStoreOperationError(
-                    backend=self.backend, operation="generate", reason=str(e)
-                )
+                KeyStoreOperationError(backend=self.backend, operation="generate", reason=str(e))
             )
 
         # Stale certificate from a previous enrolment would not match the new
@@ -289,9 +275,7 @@ class FileKeyStore:
 
         key_path = self.key_path(label)
         if not key_path.exists():
-            return Err(
-                KeyNotFoundError(backend=self.backend, label=label, location=str(key_path))
-            )
+            return Err(KeyNotFoundError(backend=self.backend, label=label, location=str(key_path)))
 
         match _check_certificate_matches_key(certificate_pem, key_path.read_text()):
             case Err(reason):
@@ -312,24 +296,16 @@ class FileKeyStore:
                 )
             )
 
-        return Ok(
-            FileCredentialSource(certificate_path=cert_path, private_key_path=key_path)
-        )
+        return Ok(FileCredentialSource(certificate_path=cert_path, private_key_path=key_path))
 
     def locate(self, label: str) -> Result[CredentialSource, KeyStoreError]:
         key_path = self.key_path(label)
         cert_path = self.certificate_path(label)
         if not key_path.exists():
-            return Err(
-                KeyNotFoundError(backend=self.backend, label=label, location=str(key_path))
-            )
+            return Err(KeyNotFoundError(backend=self.backend, label=label, location=str(key_path)))
         if not cert_path.exists():
-            return Err(
-                KeyNotFoundError(backend=self.backend, label=label, location=str(cert_path))
-            )
-        return Ok(
-            FileCredentialSource(certificate_path=cert_path, private_key_path=key_path)
-        )
+            return Err(KeyNotFoundError(backend=self.backend, label=label, location=str(cert_path)))
+        return Ok(FileCredentialSource(certificate_path=cert_path, private_key_path=key_path))
 
     def delete(self, label: str) -> Result[None, KeyStoreError]:
         match validate_label(label):
@@ -359,9 +335,7 @@ def _default_file_root() -> Path:
     return paths.state_dir() / "keys"
 
 
-def _check_certificate_matches_key(
-    certificate_pem: str, private_key_pem: str
-) -> Result[None, str]:
+def _check_certificate_matches_key(certificate_pem: str, private_key_pem: str) -> Result[None, str]:
     """Verify a certificate certifies the public key of the stored private key.
 
     Guards against installing another host's certificate, or a certificate
@@ -494,9 +468,7 @@ class KeychainKeyStore:
                 public_key_sha256=entry["public_key_sha256"],
             )
             for label, entry in raw.items()
-            if isinstance(entry, dict)
-            and "common_name" in entry
-            and "public_key_sha256" in entry
+            if isinstance(entry, dict) and "common_name" in entry and "public_key_sha256" in entry
         }
 
     def _write_index(self, index: dict[str, _IndexEntry]) -> None:
@@ -512,9 +484,7 @@ class KeychainKeyStore:
 
     # ---------------- security(1) plumbing ----------------
 
-    def _run(
-        self, args: list[str], operation: str
-    ) -> Result[str, KeyStoreOperationError]:
+    def _run(self, args: list[str], operation: str) -> Result[str, KeyStoreOperationError]:
         try:
             proc = subprocess.run(  # noqa: S603
                 [_SECURITY, *args],
@@ -524,9 +494,7 @@ class KeychainKeyStore:
             )
         except OSError as e:
             return Err(
-                KeyStoreOperationError(
-                    backend=self.backend, operation=operation, reason=str(e)
-                )
+                KeyStoreOperationError(backend=self.backend, operation=operation, reason=str(e))
             )
         if proc.returncode != 0:
             return Err(
@@ -669,7 +637,9 @@ class KeychainKeyStore:
         if any(same(entry, target) for entry in existing):
             return Ok(None)
 
-        match self._run(["list-keychains", "-d", "user", "-s", target, *existing], "set_search_list"):
+        match self._run(
+            ["list-keychains", "-d", "user", "-s", target, *existing], "set_search_list"
+        ):
             case Err(e):
                 return Err(e)
         return Ok(None)
@@ -717,13 +687,8 @@ class KeychainKeyStore:
         key_pem = crypto.serialize_private_key(private_key)
         tmpdir = tempfile.mkdtemp(prefix="iam-ra-enrol-")
         try:
-            os.chmod(tmpdir, _KEY_DIR_MODE)
             key_file = Path(tmpdir) / "key.pem"
-            fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _KEY_FILE_MODE)
-            try:
-                os.write(fd, key_pem.encode())
-            finally:
-                os.close(fd)
+            write_private_key(key_file, key_pem)
 
             # -A: any application may use it. -x: non-extractable. See the class
             # docstring for why -T is deliberately not used.
@@ -750,9 +715,7 @@ class KeychainKeyStore:
             self._write_index(index)
         except OSError as e:
             return Err(
-                KeyStoreOperationError(
-                    backend=self.backend, operation="write_index", reason=str(e)
-                )
+                KeyStoreOperationError(backend=self.backend, operation="write_index", reason=str(e))
             )
 
         return Ok(EnrolmentRequest(label=label, backend=self.backend, csr_pem=csr_pem))
@@ -893,9 +856,7 @@ class KeychainKeyStore:
             self._write_index(index)
         except OSError as e:
             return Err(
-                KeyStoreOperationError(
-                    backend=self.backend, operation="write_index", reason=str(e)
-                )
+                KeyStoreOperationError(backend=self.backend, operation="write_index", reason=str(e))
             )
 
         # Note: if the certificate was never installed there is no identity to
@@ -930,4 +891,3 @@ def get_keystore(
             reason=f"unknown key store backend {backend!r}",
         )
     )
-

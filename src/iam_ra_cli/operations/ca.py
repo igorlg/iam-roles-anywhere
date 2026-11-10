@@ -17,6 +17,7 @@ from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.cfn import delete_stack, deploy_stack
 from iam_ra_cli.lib.errors import (
     CAError,
+    CAKeyWriteError,
     StackDeleteError,
     StackDeployError,
 )
@@ -98,9 +99,21 @@ def create_self_signed_ca(
         case Ok(_):
             pass
 
-    # Save CA private key locally. It mints certificates for every host in the
-    # scope, so it is written owner-only from the moment it exists.
-    write_private_key(local_key_path, ca_keypair.private_key)
+    # Save CA private key locally.
+    #
+    # This is the highest-value secret in the system: it mints certificates for
+    # every host in the scope. Written owner-only from the moment it exists
+    # (0600 temp file, renamed into place). See SECURITY.md - in PCA mode
+    # this key does not exist on disk at all.
+    try:
+        write_private_key(local_key_path, ca_keypair.private_key)
+    except OSError as e:
+        return Err(
+            CAKeyWriteError(
+                path=local_key_path,
+                reason=str(e),
+            )
+        )
 
     # Deploy rootca stack
     template = _load_template(ROOTCA_SELF_SIGNED_TEMPLATE)

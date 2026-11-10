@@ -6,6 +6,7 @@ Tests cover:
 - CA deletion
 """
 
+import os
 import stat
 import tempfile
 from pathlib import Path
@@ -14,16 +15,16 @@ from unittest.mock import patch
 import pytest
 from moto import mock_aws
 
+from iam_ra_cli.commands.common import _format_error
 from iam_ra_cli.lib.aws import AwsContext
+from iam_ra_cli.lib.errors import CAKeyWriteError
 from iam_ra_cli.lib.result import Err, Ok
-from iam_ra_cli.models import Arn
 from iam_ra_cli.operations.ca import (
     _ca_cert_s3_key,
     _ca_key_local_path,
     _stack_name,
     create_self_signed_ca,
 )
-
 
 # =============================================================================
 # Scoped Path Helper Tests
@@ -166,7 +167,12 @@ class TestCreateSelfSignedCA:
         assert "BEGIN" in key_content
 
     def test_ca_key_is_not_readable_by_others(self, aws_env) -> None:
-        """The CA key mints certificates for every host, so its mode matters most."""
+        """The CA key mints certificates for every host, so its mode matters most.
+
+        In self-signed mode this is the highest-value secret in the system - see
+        SECURITY.md. Now that host keys are no longer escrowed in AWS, it is the
+        obvious target.
+        """
         ctx, _tmp_path = aws_env
 
         mock_outputs = {
@@ -181,6 +187,72 @@ class TestCreateSelfSignedCA:
         assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
         # 0700 on the directory means the key is not discoverable by listing.
         assert stat.S_IMODE(key_path.parent.stat().st_mode) == 0o700
+
+    def test_ca_key_mode_holds_under_a_permissive_umask(self, aws_env) -> None:
+        """Regression: the key was previously written then chmodded.
+
+        That left a window in which it existed with umask-derived permissions.
+        """
+        ctx, _tmp_path = aws_env
+
+        mock_outputs = {
+            "TrustAnchorArn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-1"
+        }
+        original = os.umask(0o000)
+        try:
+            with patch("iam_ra_cli.operations.ca.deploy_stack", return_value=Ok(mock_outputs)):
+                result = create_self_signed_ca(ctx, "myns", "test-bucket")
+        finally:
+            os.umask(original)
+
+        assert isinstance(result, Ok)
+        assert stat.S_IMODE(result.value.local_key_path.stat().st_mode) == 0o600
+
+    def test_key_write_failure_is_reported_not_raised(self, aws_env) -> None:
+        """A failed key write must return an error, not escape as an exception.
+
+        This matters because the CA certificate is already in S3 by this point,
+        so the scope is left half-built. The operator needs to be told to tear it
+        down rather than see a traceback.
+        """
+        ctx, _tmp_path = aws_env
+
+        mock_outputs = {
+            "TrustAnchorArn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-1"
+        }
+        with (
+            patch("iam_ra_cli.operations.ca.deploy_stack", return_value=Ok(mock_outputs)),
+            patch(
+                "iam_ra_cli.operations.ca.write_private_key",
+                side_effect=OSError("Read-only file system"),
+            ),
+        ):
+            result = create_self_signed_ca(ctx, "myns", "test-bucket")
+
+        assert isinstance(result, Err)
+        assert isinstance(result.error, CAKeyWriteError)
+        assert "Read-only file system" in result.error.reason
+
+    def test_key_write_failure_message_tells_the_operator_what_to_do(self, aws_env) -> None:
+        """The formatted message must name the recovery action, not just the fault."""
+        ctx, _tmp_path = aws_env
+
+        mock_outputs = {
+            "TrustAnchorArn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-1"
+        }
+        with (
+            patch("iam_ra_cli.operations.ca.deploy_stack", return_value=Ok(mock_outputs)),
+            patch(
+                "iam_ra_cli.operations.ca.write_private_key",
+                side_effect=OSError("Permission denied"),
+            ),
+        ):
+            result = create_self_signed_ca(ctx, "myns", "test-bucket")
+
+        assert isinstance(result, Err)
+        message = _format_error(result.error)
+        assert "Permission denied" in message
+        assert "iam-ra ca delete" in message
 
     def test_passes_scope_tag_to_cfn(self, aws_env) -> None:
         """Should include scope in CFN stack tags."""
@@ -204,15 +276,17 @@ class TestCreateSelfSignedCA:
         mock_outputs = {
             "TrustAnchorArn": "arn:aws:rolesanywhere:ap-southeast-2:123456789012:trust-anchor/ta-1"
         }
-        with patch("iam_ra_cli.operations.ca.deploy_stack", return_value=Ok(mock_outputs)):
-            with patch("iam_ra_cli.operations.ca.crypto.generate_ca") as mock_gen:
-                from iam_ra_cli.lib.crypto import KeyPair
+        with (
+            patch("iam_ra_cli.operations.ca.deploy_stack", return_value=Ok(mock_outputs)),
+            patch("iam_ra_cli.operations.ca.crypto.generate_ca") as mock_gen,
+        ):
+            from iam_ra_cli.lib.crypto import KeyPair
 
-                mock_gen.return_value = KeyPair(
-                    certificate="-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
-                    private_key="-----BEGIN EC PRIVATE KEY-----\nfake\n-----END EC PRIVATE KEY-----",
-                )
-                create_self_signed_ca(ctx, "myns", "test-bucket", scope="cert-manager")
+            mock_gen.return_value = KeyPair(
+                certificate="test-certificate-material",
+                private_key="test-key-material",
+            )
+            create_self_signed_ca(ctx, "myns", "test-bucket", scope="cert-manager")
 
         mock_gen.assert_called_once()
         call_kwargs = mock_gen.call_args

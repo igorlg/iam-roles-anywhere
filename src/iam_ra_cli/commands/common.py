@@ -16,6 +16,7 @@ from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     AccountMismatchError,
     CAKeyNotFoundError,
+    CAKeyWriteError,
     CannotRemoveLastRoleError,
     CAScopeAlreadyExistsError,
     CAScopeNotFoundError,
@@ -186,9 +187,7 @@ def _format_error(error: Any) -> str:
                 f"Role '{role_name}' is in use by hosts: {hosts_str}. Use --force to delete anyway."
             )
 
-        case RoleScopeMismatchError(
-            namespace, hostname, host_scope, role_name, role_scope
-        ):
+        case RoleScopeMismatchError(namespace, hostname, host_scope, role_name, role_scope):
             return (
                 f"Role '{role_name}' is in scope '{role_scope}' but host "
                 f"'{hostname}' was onboarded under scope '{host_scope}'. "
@@ -232,6 +231,14 @@ def _format_error(error: Any) -> str:
 
         case CAKeyNotFoundError(expected_path):
             return f"CA private key not found at '{expected_path}'. Was 'iam-ra init' run on this machine?"
+
+        case CAKeyWriteError(path, reason):
+            return (
+                f"Failed to write the CA private key to '{path}': {reason}\n"
+                f"The CA certificate was already uploaded, so this scope now has a "
+                f"certificate with no usable key. Delete the scope with "
+                f"'iam-ra ca delete' and set it up again rather than retrying."
+            )
 
         case CsrParseError(reason):
             return f"Could not parse the certificate signing request: {reason}"

@@ -134,21 +134,17 @@ about them before deploying, not because they are acceptable.
 ### The self-signed CA private key is the weakest link
 
 `~/.local/share/iam-ra/<namespace>/scopes/<scope>/ca-private-key.pem`, mode
-`0600`.
+`0600` in a `0700` directory.
 
 This key mints certificates for every host in the scope. It is the
 highest-value material in the system and the least protected — a plain file on a
 workstation, with no passphrase and no hardware backing. Now that host keys are
 no longer escrowed, this is unambiguously the thing an attacker should go after.
 
-Two specific weaknesses in how it is written
-(`src/iam_ra_cli/operations/ca.py:101-103`):
-
-- **Write-then-chmod.** The file is created with `write_text` and only then
-  `chmod`ed to `0600`, so it is briefly readable according to your umask. The
-  newer key-store code avoids this by passing the mode to `os.open` up front; the
-  CA path has not been updated to match.
-- **Parent directories get default permissions**, not `0700`.
+It is written with the mode set at `open` time, so it is never even transiently
+readable by others, and every directory created to hold it is owner-only. That
+closes the file-permission weaknesses, but not the fundamental one: a plain file
+readable by your user account is only as safe as that account.
 
 Mitigations available today: use `--ca-mode pca-new` or `pca-existing` so the CA
 key lives in an AWS HSM and never exists in a filesystem, and treat the admin
@@ -237,6 +233,9 @@ refactor cannot silently regress it. Notably:
 - `install` refuses a certificate whose public key does not match the stored key,
   including one superseded by a later `request`.
 - The keychain key is genuinely non-extractable (asserted via `security export`).
+- Private keys are written with the mode set at `open` time, so they are never
+  transiently readable by others whatever the umask, and no directory on the path
+  to a key is world-writable.
 - Adding a keychain to the search list extends it and never replaces it.
 - The default `--allowed-hosts *` emits **no** `PrincipalTag` condition, and the
   restricted form keeps the trust-anchor condition rather than replacing it.

@@ -67,6 +67,20 @@ class CAKeyNotFoundError:
 
 
 @dataclass(frozen=True, slots=True)
+class CAKeyWriteError:
+    """Failed to write the CA private key locally (self-signed mode).
+
+    Distinct from a generic I/O error because of what has already happened by
+    the time it fires: the CA certificate is in S3, but its key never landed.
+    That pair is unusable, and the message has to tell the operator to tear the
+    scope down rather than retry.
+    """
+
+    path: Path
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class CACertNotFoundError:
     """CA certificate not found in S3."""
 
@@ -304,7 +318,6 @@ class SSMWriteError:
     reason: str
 
 
-
 # =============================================================================
 # K8s Errors
 # =============================================================================
@@ -430,7 +443,9 @@ class StateSaveError:
 # =============================================================================
 
 type InitError = StackDeployError
-type CAError = StackDeployError | CAKeyNotFoundError | CACertNotFoundError | S3ReadError
+type CAError = (
+    StackDeployError | CAKeyNotFoundError | CAKeyWriteError | CACertNotFoundError | S3ReadError
+)
 type RoleError = NotInitializedError | RoleAlreadyExistsError | StackDeployError
 type DeleteRoleError = NotInitializedError | RoleNotFoundError | RoleInUseError | StackDeleteError
 type HostError = (
