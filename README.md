@@ -14,6 +14,7 @@ Configures hosts to **use** IAM Roles Anywhere for AWS authentication:
 - `~/.aws/config` - configured with `credential_process`
 - **Multi-profile support** - one host can assume multiple roles
 - Secrets-manager agnostic - works with SOPS, agenix, or any secret source
+- Optional 1Password `keyRef` - private key fetched at credential time, never on disk
 
 ### 2. `iam-ra` CLI (Admin Tool)
 
@@ -21,7 +22,7 @@ A CLI for **managing** IAM Roles Anywhere infrastructure:
 
 - Initialize AWS infrastructure (CloudFormation stacks)
 - Create roles with Roles Anywhere profiles
-- Onboard hosts (generate certificates, deploy stacks, create SOPS files)
+- Onboard hosts (generate certificates, deploy stacks, create SOPS files or 1Password items)
 - **Onboard Kubernetes workloads** (generate cert-manager manifests)
 
 ### 3. Kubernetes Integration
@@ -88,6 +89,9 @@ This creates:
 
 - Host CloudFormation stack with certificate in Secrets Manager
 - SOPS-encrypted secrets file: `secrets/hosts/myhost/iam-ra-default.yaml`
+
+To keep the key in 1Password instead, pass `--secrets-backend 1password
+--op-vault <vault>` (see [With 1Password](#with-1password)).
 
 ### 4. Configure Host in Nix
 
@@ -205,7 +209,7 @@ Commands:
     delete  Delete role
     list    List all roles
   host      Manage hosts
-    onboard   Onboard host (cert + stack + SOPS)
+    onboard   Onboard host (cert + stack + SOPS file or 1Password item)
     offboard  Remove host
     list      List all hosts
   k8s       Manage Kubernetes integration
@@ -232,6 +236,7 @@ iam-ra role create deploy --policy arn:aws:iam::123:policy/DeployPolicy --sessio
 # Onboard hosts
 iam-ra host onboard webserver --role admin
 iam-ra host onboard ci-runner --role deploy --validity-days 90
+iam-ra host onboard laptop --role admin --secrets-backend 1password --op-vault Private
 
 # Check status
 iam-ra status
@@ -320,6 +325,8 @@ needs:
 programs.iamRolesAnywhere = {
   enable = true;
   user = "alice";                          # Required: user to configure
+  useCredentialProcessWrapper = false;     # Forced on by keyRef
+  opPath = "op";                           # 1Password CLI for keyRef (prefer an absolute path)
 
   # One or more identities. Each = one AWS account / trust anchor / cert.
   # Most users have a single identity named `default`. For cross-account
@@ -327,7 +334,7 @@ programs.iamRolesAnywhere = {
   identities.default = {
     certificate = {
       certPath = "/path/to/cert.pem";      # Any secrets manager path
-      keyPath = "/path/to/key.pem";
+      keyPath = "/path/to/key.pem";        # Or: keyRef = "op://Vault/item/private_key";
     };
 
     trustAnchorArn = "arn:aws:rolesanywhere:...";
@@ -425,7 +432,8 @@ point.
 
 ## Secrets Manager Integration
 
-The module is **secrets-manager agnostic**. Just provide paths to certificate files.
+The module is **secrets-manager agnostic**. Just provide paths to certificate files,
+or a 1Password secret reference for the private key.
 
 ### With SOPS
 
@@ -456,6 +464,34 @@ programs.iamRolesAnywhere.identities.default.certificate = {
   keyPath = config.age.secrets.iam-ra-key.path;
 };
 ```
+
+### With 1Password
+
+The private key can stay in 1Password instead of on disk:
+
+```bash
+iam-ra host onboard myhost --role admin --secrets-backend 1password --op-vault Private
+```
+
+This creates the item `iam-ra-myhost-default` (fields `certificate` and
+`private_key`), passing the values to `op` on stdin only. It refuses if an
+item with that title already exists: delete it first to re-onboard.
+`host rotate-cert` refuses 1Password hosts.
+
+```nix
+programs.iamRolesAnywhere = {
+  opPath = "/opt/homebrew/bin/op";  # credential_process may lack a login PATH
+  identities.default.certificate = {
+    certPath = ./iam-ra/myhost-cert.pem;  # op read 'op://Private/iam-ra-myhost-default/certificate'
+    keyRef = "op://Private/iam-ra-myhost-default/private_key";
+  };
+};
+```
+
+Each identity sets exactly one of `keyPath` or `keyRef`; `keyRef` implies
+the wrapper scripts. Trade-off: every credential fetch runs `op read`
+(~0.5-2s, may prompt for Touch ID); there is no caching. See
+[`examples/hosts/single-role-1password.nix`](examples/hosts/single-role-1password.nix).
 
 ### With Static Files
 
