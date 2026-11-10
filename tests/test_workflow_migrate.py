@@ -14,6 +14,7 @@ limited support for the complex CloudFormation templates.
 """
 
 import json
+import stat
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -376,6 +377,31 @@ class TestMigrateLocalKey:
             new_path = paths_mod.data_dir() / "test" / "scopes" / "default" / "ca-private-key.pem"
             assert new_path.exists()
             assert new_path.read_text() == SAMPLE_CA_KEY
+
+    def test_migrated_key_is_not_readable_by_others(self, aws_credentials, temp_xdg_dirs) -> None:
+        """The migrated CA key must be owner-only, as when it was first created."""
+        import iam_ra_cli.lib.paths as paths_mod
+
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_v1_in_aws(ctx, with_roles=False)
+            setup_v1_local_key(temp_xdg_dirs / "data")
+
+            with (
+                patch(
+                    "iam_ra_cli.workflows.migrate.update_role_stack",
+                    return_value=Ok(None),
+                ),
+                patch(
+                    "iam_ra_cli.workflows.migrate.migrate_ca_stack",
+                    return_value=Ok(MIGRATED_TA_ARN),
+                ),
+            ):
+                migrate(ctx, "test")
+
+            new_path = paths_mod.data_dir() / "test" / "scopes" / "default" / "ca-private-key.pem"
+            assert stat.S_IMODE(new_path.stat().st_mode) == 0o600
+            assert stat.S_IMODE(new_path.parent.stat().st_mode) == 0o700
 
     def test_deletes_old_key(self, aws_credentials, temp_xdg_dirs) -> None:
         """Old key path should be deleted after migration."""
@@ -1119,6 +1145,9 @@ class TestMigrateSopsFiles:
             ctx = AwsContext(region="ap-southeast-2")
             self._setup_v1_with_host(ctx)
             setup_v1_local_key(temp_xdg_dirs / "data")
+            # decrypt_file is patched, so the file only needs to exist.
+            sops_path = temp_xdg_dirs / "iam-ra.yaml"
+            sops_path.touch()
 
             with (
                 patch(
@@ -1131,7 +1160,7 @@ class TestMigrateSopsFiles:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.resolve_existing_secrets_path",
-                    return_value=(Path("/fake/secrets/hosts/host1/iam-ra.yaml"), False),
+                    return_value=(sops_path, False),
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.update_role_stack",
@@ -1143,7 +1172,6 @@ class TestMigrateSopsFiles:
                         "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-v2"
                     ),
                 ),
-                patch("pathlib.Path.exists", return_value=True),
             ):
                 result = migrate(ctx, "test")
 
@@ -1165,6 +1193,9 @@ class TestMigrateSopsFiles:
             ctx = AwsContext(region="ap-southeast-2")
             self._setup_v1_with_host(ctx)
             setup_v1_local_key(temp_xdg_dirs / "data")
+            # decrypt_file is patched, so the file only needs to exist.
+            sops_path = temp_xdg_dirs / "iam-ra.yaml"
+            sops_path.touch()
 
             with (
                 patch(
@@ -1177,7 +1208,7 @@ class TestMigrateSopsFiles:
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.resolve_existing_secrets_path",
-                    return_value=(Path("/fake/secrets/hosts/host1/iam-ra.yaml"), False),
+                    return_value=(sops_path, False),
                 ),
                 patch(
                     "iam_ra_cli.workflows.migrate.update_role_stack",
@@ -1189,7 +1220,6 @@ class TestMigrateSopsFiles:
                         "arn:aws:rolesanywhere:us-east-1:123456789012:trust-anchor/ta-v2"
                     ),
                 ),
-                patch("pathlib.Path.exists", return_value=True),
             ):
                 result = migrate(ctx, "test")
 

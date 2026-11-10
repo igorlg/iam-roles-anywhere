@@ -37,6 +37,7 @@ from iam_ra_cli.lib.sops import (
     resolve_existing_secrets_path,
     write_and_encrypt,
 )
+from iam_ra_cli.lib.storage.file import write_private_key
 from iam_ra_cli.lib.storage.s3 import delete_object, object_exists, read_object, write_object
 from iam_ra_cli.models import CA, Arn
 from iam_ra_cli.operations.ca import (
@@ -313,9 +314,7 @@ def migrate(ctx: AwsContext, namespace: str) -> Result[MigrateResult, MigrateErr
         key_pem = old_key_path.read_text()
 
         # Write to new scoped path
-        new_key_path.parent.mkdir(parents=True, exist_ok=True)
-        new_key_path.write_text(key_pem)
-        new_key_path.chmod(0o600)
+        write_private_key(new_key_path, key_pem)
 
         # Delete old key
         old_key_path.unlink()
