@@ -4,7 +4,8 @@
 #
 # Layers:
 #   1. Global: at least one identity; unique awsProfileName; at most one makeDefault
-#   2. Per-identity: valid trustAnchorArn; at least one profile
+#   2. Per-identity: valid trustAnchorArn; at least one profile;
+#      exactly one of keyPath/keyRef
 #   3. Per-profile: valid profileArn and roleArn
 #
 # Negative tests in checks.nix exercise the global assertions by
@@ -42,6 +43,10 @@ let
       {
         assertion = identityCfg.profiles != { };
         message = "programs.iamRolesAnywhere.identities.${identityName}: at least one profile must be defined under 'profiles'";
+      }
+      {
+        assertion = (identityCfg.certificate.keyPath == null) != (identityCfg.certificate.keyRef == null);
+        message = "programs.iamRolesAnywhere.identities.${identityName}.certificate: exactly one of keyPath and keyRef must be set";
       }
     ]
     ++ lib.flatten (

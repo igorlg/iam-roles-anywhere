@@ -128,7 +128,7 @@ let
 
           programs.iamRolesAnywhere = {
             enable = true;
-            inherit (cfg) identities useCredentialProcessWrapper;
+            inherit (cfg) identities useCredentialProcessWrapper opPath;
           };
         };
 
