@@ -66,3 +66,40 @@ def sample_ca_keypair():
     from iam_ra_cli.lib.crypto import generate_ca
 
     return generate_ca(common_name="Test CA", validity_years=1)
+
+
+class FakeOp:
+    """Stand-in for subprocess.run in lib/onepassword.py: records every
+    `op` call. `items` is what `op item list` returns; `fail_list` /
+    `fail_write` make list or create fail like a locked 1Password."""
+
+    def __init__(self) -> None:
+        self.items: list[dict[str, str]] = []
+        self.fail_list = False
+        self.fail_write = False
+        self.calls: list[dict] = []
+
+    def __call__(self, argv: list[str], **kwargs):
+        import json
+        import subprocess
+
+        self.calls.append({"argv": argv, "input": kwargs.get("input"), "kwargs": kwargs})
+        if argv[1:3] == ["item", "list"]:
+            if self.fail_list:
+                return subprocess.CompletedProcess(argv, 1, "", "[ERROR] not signed in")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(self.items), "")
+        if self.fail_write:
+            return subprocess.CompletedProcess(argv, 1, "", "[ERROR] account is locked")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    @property
+    def creates(self) -> list[dict]:
+        return [c for c in self.calls if c["argv"][1:3] == ["item", "create"]]
+
+
+@pytest.fixture
+def fake_op(monkeypatch: pytest.MonkeyPatch) -> FakeOp:
+    """Patch `op` (never executed) with a recording FakeOp."""
+    fake = FakeOp()
+    monkeypatch.setattr("iam_ra_cli.lib.onepassword.subprocess.run", fake)
+    return fake

@@ -109,6 +109,8 @@ let
         #   - SOPS: config.sops.secrets."iam-ra/<identity>/cert".path
         #   - agenix: config.age.secrets.iam-ra-<identity>-cert.path
         #   - Static files: "/etc/ssl/iam-ra/<identity>/cert.pem"
+        # Alternatively the private key can stay in 1Password and be
+        # fetched at credential time via keyRef (never written to disk).
         certificate = {
           certPath = lib.mkOption {
             type = lib.types.either lib.types.path lib.types.str;
@@ -121,13 +123,29 @@ let
           };
 
           keyPath = lib.mkOption {
-            type = lib.types.either lib.types.path lib.types.str;
+            type = lib.types.nullOr (lib.types.either lib.types.path lib.types.str);
+            default = null;
             description = ''
               Path to the private key file (PEM format).
               This key corresponds to the certificate and is shared
               across all profiles in this identity.
+
+              Exactly one of `keyPath` and `keyRef` must be set.
             '';
             example = "/run/secrets/iam-ra/work/key.pem";
+          };
+
+          keyRef = lib.mkOption {
+            type = lib.types.nullOr (lib.types.strMatching "op://.+");
+            default = null;
+            description = ''
+              1Password secret reference (`op://<vault>/<item>/<field>`)
+              to the private key (PEM format), as an alternative to
+              `keyPath`. Fetched with `op read` on every credential
+              fetch and never written to disk. Implies the wrapper
+              scripts of `useCredentialProcessWrapper`; see `opPath`.
+            '';
+            example = "op://Private/iam-ra-myhost-default/private_key";
           };
         };
 
@@ -241,9 +259,21 @@ in
       arguments single-quoted for safety.
 
       Defaults to false (inline) to preserve the existing behaviour;
-      opt in when you want a cleaner `~/.aws/config`.
+      opt in when you want a cleaner `~/.aws/config`. Enabled
+      automatically when any identity sets `certificate.keyRef`.
     '';
     example = true;
+  };
+
+  opPath = lib.mkOption {
+    type = lib.types.str;
+    default = "op";
+    description = ''
+      1Password CLI used to resolve `certificate.keyRef`. Prefer an
+      absolute path (e.g. `/opt/homebrew/bin/op`): credential_process
+      may run without a login shell PATH.
+    '';
+    example = "/opt/homebrew/bin/op";
   };
 
   # ===================

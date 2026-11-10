@@ -14,6 +14,7 @@ from iam_ra_cli.lib.errors import (
     HostAlreadyExistsError,
     HostNotFoundError,
     NotInitializedError,
+    OnePasswordHostUnsupportedError,
     PCADescribeError,
     PCAGetCertError,
     PCAIssueCertError,
@@ -29,6 +30,7 @@ from iam_ra_cli.lib.errors import (
     StateLoadError,
     StateSaveError,
 )
+from iam_ra_cli.lib.onepassword import OnePasswordItem
 from iam_ra_cli.lib.preflight import check_account_matches_namespace
 from iam_ra_cli.lib.result import Err, Ok, Result
 from iam_ra_cli.lib.sops import (
@@ -48,7 +50,11 @@ from iam_ra_cli.operations.host import (
 from iam_ra_cli.operations.host import (
     offboard_host as offboard_host_op,
 )
-from iam_ra_cli.operations.secrets import SecretsFileResult, create_secrets_file
+from iam_ra_cli.operations.secrets import (
+    SecretsFileResult,
+    create_secrets_file,
+    store_in_onepassword,
+)
 
 type OnboardError = (
     NotInitializedError
@@ -97,6 +103,7 @@ type RotateCertError = (
     NotInitializedError
     | AccountMismatchError
     | HostNotFoundError
+    | OnePasswordHostUnsupportedError
     | CAScopeNotFoundError
     | CAKeyNotFoundError
     | CACertNotFoundError
@@ -130,6 +137,8 @@ class OnboardConfig:
     create_sops: bool = True
     sops_output_path: Path | None = None
     overwrite: bool = False
+    # Set: store cert + key in this 1Password vault instead of a SOPS file.
+    op_vault: str | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +175,8 @@ class OnboardResult:
     region: str
     trust_anchor_arn: Arn
     role_profiles: tuple[RoleProfile, ...]
+    # Set instead of secrets_file when stored in 1Password.
+    onepassword_item: OnePasswordItem | None = None
 
 
 def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, OnboardError]:
@@ -176,8 +187,8 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
     3. Check host doesn't already exist (unless overwrite)
     4. Generate cert based on CA mode
     5. Deploy host stack
-    6. Create SOPS file (if requested)
-    7. Update state
+    6. Update state
+    7. Store cert + key (if requested): SOPS file, or 1Password item
     """
     # Load state
     match state_module.load(ctx.ssm, ctx.s3, config.namespace):
@@ -281,6 +292,7 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
         scope=scope,
         certificate_secret_arn=host_result.certificate_secret_arn,
         private_key_secret_arn=host_result.private_key_secret_arn,
+        secrets_backend="1password" if config.create_sops and config.op_vault else "sops",
     )
 
     # Build RoleProfile records for the result
@@ -302,7 +314,21 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
     # map (not just the first role). A host onboarded with N roles writes N
     # profile entries into the SOPS file.
     secrets_result: SecretsFileResult | None = None
-    if config.create_sops:
+    op_item: OnePasswordItem | None = None
+    if config.create_sops and config.op_vault:
+        match store_in_onepassword(
+            ctx,
+            hostname=config.hostname,
+            certificate_secret_arn=str(host_result.certificate_secret_arn),
+            private_key_secret_arn=str(host_result.private_key_secret_arn),
+            vault=config.op_vault,
+            namespace=config.namespace,
+        ):
+            case Err() as e:
+                return e
+            case Ok(item):
+                op_item = item
+    elif config.create_sops:
         sops_profiles = tuple(
             SopsProfile(
                 role_name=rp.role_name,
@@ -342,6 +368,7 @@ def onboard(ctx: AwsContext, config: OnboardConfig) -> Result[OnboardResult, Onb
             region=ctx.region,
             trust_anchor_arn=scope_ca.trust_anchor_arn,
             role_profiles=role_profiles,
+            onepassword_item=op_item,
         )
     )
 
@@ -904,6 +931,10 @@ def rotate_cert(
     if config.hostname not in state.hosts:
         return Err(HostNotFoundError(config.namespace, config.hostname))
     host = state.hosts[config.hostname]
+    if host.secrets_backend == "1password":
+        return Err(
+            OnePasswordHostUnsupportedError(config.namespace, config.hostname, "host rotate-cert")
+        )
 
     # Scope's CA must exist
     if host.scope not in state.cas:

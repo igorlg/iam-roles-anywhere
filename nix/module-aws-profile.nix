@@ -9,7 +9,8 @@
 # into one attrset keyed by awsProfileName (uniqueness enforced in
 # module-validation.nix).
 #
-# Output format is switched by cfg.useCredentialProcessWrapper:
+# Output format is switched by useWrapper (cfg.useCredentialProcessWrapper,
+# forced on when any identity uses a 1Password keyRef):
 #   - false (default): credential_process is the full inline command
 #   - true:            credential_process is a path to
 #                      ~/.aws/iam-ra/<awsProfileName>.sh, and a
@@ -28,6 +29,11 @@
 let
   signingHelperPath = "${pkgs.aws-signing-helper}/bin/aws_signing_helper";
 
+  # An inline credential_process cannot fetch a keyRef from 1Password.
+  useWrapper =
+    cfg.useCredentialProcessWrapper
+    || lib.any (i: i.certificate.keyRef != null) (lib.attrValues cfg.identities);
+
   # Resolve a profile's effective session duration (profile override
   # falling back to identity default, possibly null).
   effectiveSessionDuration =
@@ -41,13 +47,27 @@ let
   credProcessArgs = identityCfg: profileCfg: {
     inherit signingHelperPath;
     certificatePath = toString identityCfg.certificate.certPath;
-    privateKeyPath = toString identityCfg.certificate.keyPath;
+    privateKeyPath =
+      if identityCfg.certificate.keyPath == null then null else toString identityCfg.certificate.keyPath;
     trustAnchorArn = identityCfg.trustAnchorArn;
     profileArn = profileCfg.profileArn;
     roleArn = profileCfg.roleArn;
     region = identityCfg.region;
     sessionDuration = effectiveSessionDuration identityCfg profileCfg;
   };
+
+  # Wrapper-script args, plus the 1Password reference for keyRef identities.
+  scriptArgs =
+    identityCfg: profileCfg:
+    let
+      inherit (identityCfg.certificate) keyRef;
+    in
+    credProcessArgs identityCfg profileCfg
+    // lib.optionalAttrs (keyRef != null) {
+      privateKeyRef = keyRef;
+      inherit (cfg) opPath;
+      keyServePath = "${pkgs.callPackage ./keyserve.nix { }}";
+    };
 
   # Inline credential_process command (legacy path, default behaviour).
   mkCredentialProcess =
@@ -65,7 +85,7 @@ let
   # wrapper path or the inline command, depending on the flag.
   mkCredentialProcessValue =
     identityCfg: profileCfg:
-    if cfg.useCredentialProcessWrapper then
+    if useWrapper then
       wrapperScriptPath profileCfg.awsProfileName
     else
       mkCredentialProcess identityCfg profileCfg;
@@ -130,7 +150,7 @@ let
       name = wrapperScriptHomeFileKey rec_.awsProfileName;
       value = {
         executable = true;
-        text = mkCredentialProcessScript (credProcessArgs rec_.identityCfg rec_.profileCfg);
+        text = mkCredentialProcessScript (scriptArgs rec_.identityCfg rec_.profileCfg);
       };
     }) allProfileRecords
   );
@@ -150,7 +170,7 @@ lib.mkMerge [
       ];
     };
   }
-  (lib.mkIf (hasAnyProfile && cfg.useCredentialProcessWrapper) {
+  (lib.mkIf (hasAnyProfile && useWrapper) {
     home.file = wrapperScriptHomeFiles;
   })
 ]

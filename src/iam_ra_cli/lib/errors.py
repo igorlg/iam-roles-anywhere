@@ -239,6 +239,23 @@ class SecretsFileExistsError:
 
 
 @dataclass(frozen=True, slots=True)
+class OnePasswordError:
+    """A 1Password CLI (``op``) call failed, or the host's item exists."""
+
+    item: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class OnePasswordHostUnsupportedError:
+    """A SOPS-only command was run on a host onboarded to 1Password."""
+
+    namespace: str
+    hostname: str
+    command: str
+
+
+@dataclass(frozen=True, slots=True)
 class SopsPathConflictError:
     """SOPS path migration found hosts that have BOTH the legacy and the
     canonical-namespaced SOPS file present.
@@ -396,4 +413,6 @@ type HostError = (
     | PCATimeoutError
 )
 type OffboardError = NotInitializedError | HostNotFoundError | StackDeleteError
-type SecretsError = SecretsManagerReadError | SOPSEncryptError | SecretsFileExistsError
+type SecretsError = (
+    SecretsManagerReadError | SOPSEncryptError | SecretsFileExistsError | OnePasswordError
+)
