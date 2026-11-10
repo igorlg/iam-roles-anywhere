@@ -649,6 +649,17 @@ let
     };
   };
 
+  # examples/hosts/single-role-1password.nix must evaluate. It is a
+  # system-module example, so drop the system-only `user` option and
+  # feed the rest to the home module.
+  test-example-single-role-1password = mkTestHome {
+    extraConfig = {
+      programs.iamRolesAnywhere =
+        removeAttrs (import ../examples/hosts/single-role-1password.nix { }).programs.iamRolesAnywhere
+          [ "user" ];
+    };
+  };
+
   # ===================
   # Negative Tests (assertion coverage)
   # ===================
@@ -779,6 +790,7 @@ in
   iam-ra-home-multi-identity = test-home-multi-identity;
   iam-ra-home-wrapper-scripts = test-home-wrapper-scripts;
   iam-ra-home-wrapper-scripts-multi-identity = test-home-wrapper-scripts-multi-identity;
+  iam-ra-example-single-role-1password = test-example-single-role-1password;
 
   # Validation assertion tests (negative - config SHOULD fail)
   iam-ra-empty-identities-fails = test-empty-identities-fails;
