@@ -278,6 +278,106 @@ let
     echo "PASS" > $out/result
   '';
 
+  # Runs the keyRef wrapper with a stub `op` (prints a throwaway key)
+  # and a stub aws_signing_helper that opens --private-key 21 times,
+  # like the real one (11-21). Asserts that every read starts with the
+  # whole key, stdout passes through, op failing or printing no PEM
+  # stops before the helper, and that neither the temp dir nor a FIFO
+  # writer outlives the helper, even after SIGKILL. Leftover processes
+  # are detected without ps: every child inherits fd 7 (a pipe), and
+  # `cat` on its read end only sees EOF once all holders have exited.
+  test-credential-script-keyref-run =
+    let
+      ref = "op://My Vault/iam-ra-test-host-default/private_key";
+      keyFile = pkgs.writeText "throwaway-key.pem" ''
+        -----BEGIN PRIVATE KEY-----
+        VGhpcyBpcyBhIHRocm93YXdheSB0ZXN0IGtleSwgbm90IGEgc2VjcmV0Lg==
+        -----END PRIVATE KEY-----
+      '';
+      stubOp = pkgs.writeShellScript "op" ''
+        [ "$1 $2" = ${lib.escapeShellArg "read ${ref}"} ] || exit 64
+        [ -n "''${OP_STUB_FAIL:-}" ] && exit 1
+        [ -n "''${OP_STUB_EMPTY:-}" ] && exit 0
+        cat ${keyFile}
+      '';
+      # HELPER_STUB_HANG: record the FIFO path, then block until killed.
+      stubHelper = pkgs.writeShellScript "aws_signing_helper" ''
+        touch "$WORK/helper-ran"
+        case "$*" in *PRIVATE*) exit 92 ;; esac
+        while [ $# -gt 0 ]; do
+          [ "$1" = --private-key ] && key=$2
+          shift
+        done
+        [ -p "$key" ] || exit 90
+        if [ -n "''${HELPER_STUB_HANG:-}" ]; then
+          echo "$key" > "$WORK/key-path"
+          exec sleep 60
+        fi
+        len=$(wc -c < ${keyFile})
+        for i in $(seq 21); do
+          head -c "$len" "$key" | cmp -s - ${keyFile} || exit 91
+        done
+        echo '{"Version":1}'
+      '';
+      script = pkgs.writeText "keyref-wrapper.sh" (
+        self.lib.mkCredentialProcessScript {
+          signingHelperPath = "${stubHelper}";
+          certificatePath = "/etc/iam-ra/cert.pem";
+          privateKeyRef = ref;
+          opPath = "${stubOp}";
+          keyServePath = "${pkgs.callPackage ./keyserve.nix { }}";
+          trustAnchorArn = testArns.trustAnchor;
+          profileArn = testArns.profile;
+          roleArn = testArns.role;
+        }
+      );
+    in
+    pkgs.runCommand "test-iam-ra-credential-script-keyref-run" { } ''
+      set -u
+      export WORK=$PWD/work
+      fail() { echo "FAIL: $*"; exit 1; }
+
+      # start <env...>: run the wrapper in the background with fd 7 held.
+      start() {
+        rm -rf "$WORK"; mkdir -p "$WORK/tmp"; mkfifo "$WORK/linger"
+        cat "$WORK/linger" > /dev/null & watcher=$!
+        env TMPDIR="$WORK/tmp" "$@" ${pkgs.bash}/bin/bash ${script} \
+          > "$WORK/stdout" 2> "$WORK/stderr" 7> "$WORK/linger" &
+        wrapper=$!
+      }
+      # finish <name>: wait for the wrapper; fail if anything still holds
+      # fd 7 5s later, or if the temp dir isn't empty.
+      finish() {
+        rc=0; wait "$wrapper" || rc=$?
+        for _ in $(seq 50); do kill -0 "$watcher" 2>/dev/null || break; sleep 0.1; done
+        kill -0 "$watcher" 2>/dev/null && { kill "$watcher"; fail "$1: a process outlived the wrapper"; }
+        [ -z "$(ls -A "$WORK/tmp")" ] || fail "$1: temp dir left: $(ls -A "$WORK/tmp")"
+        echo "--- $1: rc=$rc"; cat "$WORK/stderr"
+      }
+
+      start; finish success
+      [ "$rc" = 0 ] || fail "success: rc=$rc"
+      [ "$(cat "$WORK/stdout")" = '{"Version":1}' ] || fail "success: stdout not passed through"
+
+      for v in OP_STUB_FAIL OP_STUB_EMPTY; do
+        start "$v=1"; finish "$v"
+        [ "$rc" != 0 ] || fail "$v: wrapper succeeded"
+        [ ! -s "$WORK/stdout" ] || fail "$v: wrapper wrote to stdout"
+        [ ! -e "$WORK/helper-ran" ] || fail "$v: helper was invoked"
+      done
+
+      # SIGKILL the (exec'd) helper: keyserve must remove the dir and exit.
+      start HELPER_STUB_HANG=1
+      for _ in $(seq 100); do [ -s "$WORK/key-path" ] && break; sleep 0.1; done
+      [ -s "$WORK/key-path" ] || fail "kill-9: helper never started"
+      kill -9 "$wrapper"
+      finish kill-9
+
+      echo "PASS: keyRef wrapper serves the key via FIFO and cleans up"
+      mkdir -p $out
+      echo PASS > $out/result
+    '';
+
   # ===================
   # Module Existence Tests
   # ===================
@@ -642,6 +742,21 @@ let
     };
   };
 
+  # Neither keyPath nor keyRef set.
+  test-no-key-fails = mkAssertionFailsTest "test-iam-ra-no-key-fails" {
+    programs.iamRolesAnywhere = {
+      enable = true;
+      identities.default = {
+        trustAnchorArn = testArns.trustAnchor;
+        certificate.certPath = "/etc/iam-ra/cert.pem";
+        profiles.admin = {
+          profileArn = testArns.profileAdmin;
+          roleArn = testArns.roleAdmin;
+        };
+      };
+    };
+  };
+
 in
 {
   # Library tests
@@ -649,6 +764,7 @@ in
   iam-ra-lib-validation = test-lib-validation;
   iam-ra-lib-credential-command = test-lib-credential-command;
   iam-ra-lib-credential-script = test-lib-credential-script;
+  iam-ra-credential-script-keyref-run = test-credential-script-keyref-run;
 
   # Module existence tests
   iam-ra-home-module-exists = test-home-module-exists;
@@ -668,4 +784,5 @@ in
   iam-ra-empty-identities-fails = test-empty-identities-fails;
   iam-ra-duplicate-aws-profile-name-fails = test-duplicate-aws-profile-name-fails;
   iam-ra-multiple-make-default-fails = test-multiple-make-default-fails;
+  iam-ra-no-key-fails = test-no-key-fails;
 }
