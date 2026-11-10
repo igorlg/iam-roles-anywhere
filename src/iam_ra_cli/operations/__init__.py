@@ -13,7 +13,7 @@ from iam_ra_cli.operations.host import (
 )
 from iam_ra_cli.operations.infra import delete_init, deploy_init
 from iam_ra_cli.operations.role import create_role, delete_role
-from iam_ra_cli.operations.secrets import create_secrets_file
+from iam_ra_cli.operations.secrets import create_secrets_file, store_in_onepassword
 
 __all__ = [
     # infra
@@ -33,4 +33,5 @@ __all__ = [
     "offboard_host",
     # secrets
     "create_secrets_file",
+    "store_in_onepassword",
 ]

@@ -1,12 +1,18 @@
-"""Secrets file operations - SOPS-encrypted secrets for Nix deployment."""
+"""Secrets operations - hand host cert + key to Nix deployment.
+
+Either a SOPS-encrypted file in the Nix repo (default), or a 1Password
+item referenced by the Nix module's ``certificate.keyRef``.
+"""
 
 from dataclasses import dataclass
 from pathlib import Path
 
 from botocore.exceptions import ClientError
 
+from iam_ra_cli.lib import onepassword
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
+    OnePasswordError,
     SecretsError,
     SecretsFileExistsError,
     SecretsManagerReadError,
@@ -28,6 +34,21 @@ class SecretsFileResult:
 
     path: Path
     encrypted: bool
+
+
+def _read_host_secrets(
+    ctx: AwsContext,
+    certificate_secret_arn: str,
+    private_key_secret_arn: str,
+) -> Result[tuple[str, str], SecretsManagerReadError]:
+    """Fetch (certificate_pem, private_key_pem) from Secrets Manager."""
+    pems: list[str] = []
+    for arn in (certificate_secret_arn, private_key_secret_arn):
+        try:
+            pems.append(ctx.secrets.get_secret_value(SecretId=arn)["SecretString"])
+        except ClientError as e:
+            return Err(SecretsManagerReadError(arn, str(e)))
+    return Ok((pems[0], pems[1]))
 
 
 def create_secrets_file(
@@ -75,17 +96,11 @@ def create_secrets_file(
         return Err(SecretsFileExistsError(path))
 
     # Retrieve cert + key from Secrets Manager
-    try:
-        cert_response = ctx.secrets.get_secret_value(SecretId=certificate_secret_arn)
-        certificate = cert_response["SecretString"]
-    except ClientError as e:
-        return Err(SecretsManagerReadError(certificate_secret_arn, str(e)))
-
-    try:
-        key_response = ctx.secrets.get_secret_value(SecretId=private_key_secret_arn)
-        private_key = key_response["SecretString"]
-    except ClientError as e:
-        return Err(SecretsManagerReadError(private_key_secret_arn, str(e)))
+    match _read_host_secrets(ctx, certificate_secret_arn, private_key_secret_arn):
+        case Err() as e:
+            return e
+        case Ok((certificate, private_key)):
+            pass
 
     # Render v2 YAML
     secrets = SopsSecrets(
@@ -110,3 +125,26 @@ def create_secrets_file(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(yaml_content)
         return Ok(SecretsFileResult(path=path, encrypted=False))
+
+
+def store_in_onepassword(
+    ctx: AwsContext,
+    hostname: str,
+    certificate_secret_arn: str,
+    private_key_secret_arn: str,
+    vault: str,
+    namespace: str = "default",
+) -> Result[onepassword.OnePasswordItem, SecretsError]:
+    """Copy a host's cert + key from Secrets Manager into a new 1Password
+    item ``iam-ra-<hostname>-<namespace>`` (see :mod:`iam_ra_cli.lib.onepassword`).
+    """
+    match _read_host_secrets(ctx, certificate_secret_arn, private_key_secret_arn):
+        case Err() as e:
+            return e
+        case Ok((certificate, private_key)):
+            pass
+    title = onepassword.item_title(hostname, namespace)
+    try:
+        return Ok(onepassword.create_item(vault, title, certificate, private_key))
+    except RuntimeError as e:
+        return Err(OnePasswordError(title, str(e)))

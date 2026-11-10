@@ -28,6 +28,8 @@ from iam_ra_cli.lib.errors import (
     K8sWorkloadAlreadyExistsError,
     K8sWorkloadNotFoundError,
     NotInitializedError,
+    OnePasswordError,
+    OnePasswordHostUnsupportedError,
     PCADescribeError,
     PCAGetCertError,
     PCAIssueCertError,
@@ -256,6 +258,16 @@ def _format_error(error: Any) -> str:
 
         case SecretsFileExistsError(path):
             return f"Secrets file already exists: {path}"
+
+        case OnePasswordError(item, reason):
+            return f"1Password operation failed for item '{item}': {reason}"
+
+        case OnePasswordHostUnsupportedError(namespace, hostname, command):
+            return (
+                f"Host '{hostname}' (namespace '{namespace}') keeps its key in 1Password; "
+                f"'{command}' only updates SOPS files. Delete the 1Password item and "
+                f"re-onboard with --overwrite instead."
+            )
 
         case SopsPathConflictError(namespace, hostnames):
             hosts_str = ", ".join(hostnames)

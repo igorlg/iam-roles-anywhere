@@ -9,7 +9,10 @@ import json
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from enum import Enum, StrEnum
-from typing import Any, Self
+from typing import Any, Literal, Self
+
+# Where a host's cert + key were handed to Nix (host onboard --secrets-backend).
+type SecretsBackend = Literal["sops", "1password"]
 
 
 class Arn(str):
@@ -135,6 +138,10 @@ class Host:
     `scope` is explicit in v3 - in v2 it was inferred from the single
     role's scope. Making it explicit means a host's identity (scope + cert)
     is self-describing without a cross-reference to the role table.
+
+    `secrets_backend` records where onboarding put the cert + key, so
+    `host rotate-cert` (which rewrites the SOPS file) can refuse
+    1Password hosts. State written before it existed loads as "sops".
     """
 
     stack_name: str
@@ -143,6 +150,7 @@ class Host:
     certificate_secret_arn: Arn
     private_key_secret_arn: Arn
     scope: str = "default"
+    secrets_backend: SecretsBackend = "sops"
 
 
 @dataclass(frozen=True)

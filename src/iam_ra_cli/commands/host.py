@@ -13,7 +13,9 @@ from iam_ra_cli.commands.common import (
     namespace_option,
     render_json,
 )
+from iam_ra_cli.lib.onepassword import OnePasswordItem
 from iam_ra_cli.lib.sops import get_nix_repo_root
+from iam_ra_cli.models import SecretsBackend
 from iam_ra_cli.workflows import list_hosts, offboard, onboard
 from iam_ra_cli.workflows.host import (
     AddRoleConfig,
@@ -92,28 +94,69 @@ def _render_nix_snippet(result: OnboardResult, rel_sops_path: Path | None) -> li
         f'       trustAnchorArn = "{result.trust_anchor_arn}";',
         f'       region = "{result.region}";',
         "       profiles = {",
+        *_profile_entries(result, "         "),
+        "       };",
+        "     };",
+        "",
+        "3. Deploy and verify:",
+        "",
+        *_verify_lines(result),
     ]
+    return lines
+
+
+def _profile_entries(result: OnboardResult, pad: str) -> list[str]:
+    """One `<role> = { profileArn; roleArn; };` block per role profile."""
+    lines: list[str] = []
     for rp in result.role_profiles:
         lines.extend(
             [
-                f"         {rp.role_name} = {{",
-                f'           profileArn = "{rp.profile_arn}";',
-                f'           roleArn    = "{rp.role_arn}";',
-                "         };",
+                f"{pad}{rp.role_name} = {{",
+                f'{pad}  profileArn = "{rp.profile_arn}";',
+                f'{pad}  roleArn    = "{rp.role_arn}";',
+                f"{pad}}};",
             ]
         )
-    lines.extend(
-        [
-            "       };",
-            "     };",
-            "",
-            "3. Deploy and verify:",
-            "",
-        ]
-    )
-    for rp in result.role_profiles:
-        lines.append(f"     aws sts get-caller-identity --profile {rp.role_name}")
     return lines
+
+
+def _verify_lines(result: OnboardResult) -> list[str]:
+    return [
+        f"     aws sts get-caller-identity --profile {rp.role_name}"
+        for rp in result.role_profiles
+    ]
+
+
+def _render_onepassword_nix_snippet(result: OnboardResult, item: OnePasswordItem) -> list[str]:
+    """Nix snippet for a host whose key lives in 1Password (keyRef). The
+    certificate is not secret, so it is exported once to a regular file."""
+    return [
+        "1. Save the (non-secret) certificate next to your Nix config:",
+        "",
+        f"     op read '{item.certificate_ref}' > cert.pem",
+        "",
+        "2. Enable IAM Roles Anywhere for this host:",
+        "",
+        "     programs.iamRolesAnywhere = {",
+        "       enable = true;",
+        '       opPath = "/opt/homebrew/bin/op";  # absolute path to the 1Password CLI',
+        f"       identities.{result.namespace} = {{",
+        "         certificate = {",
+        "           certPath = ./cert.pem;",
+        f'           keyRef   = "{item.key_ref}";',
+        "         };",
+        f'         trustAnchorArn = "{result.trust_anchor_arn}";',
+        f'         region = "{result.region}";',
+        "         profiles = {",
+        *_profile_entries(result, "           "),
+        "         };",
+        "       };",
+        "     };",
+        "",
+        "3. Deploy and verify (each call runs `op read`; may prompt Touch ID):",
+        "",
+        *_verify_lines(result),
+    ]
 
 
 def _render_human(result: OnboardResult) -> None:
@@ -142,7 +185,20 @@ def _render_human(result: OnboardResult) -> None:
         echo_key_value(f"Profile ({rp.role_name})", str(rp.profile_arn), indent=1)
         echo_key_value(f"Role ARN ({rp.role_name})", str(rp.role_arn), indent=1)
 
-    if result.secrets_file:
+    if result.onepassword_item:
+        item = result.onepassword_item
+        click.echo()
+        click.secho("1Password item:", bold=True)
+        echo_key_value("Item", f"{item.title} (vault {item.vault})", indent=1)
+        echo_key_value("Key ref", item.key_ref, indent=1)
+        echo_key_value("Cert ref", item.certificate_ref, indent=1)
+
+        click.echo()
+        click.secho("Next steps:", bold=True)
+        click.echo()
+        for line in _render_onepassword_nix_snippet(result, item):
+            click.echo(f"  {line}")
+    elif result.secrets_file:
         absolute, _repo_root, relative = _sops_paths(result.secrets_file.path)
         click.echo()
         click.secho("Secrets file:", bold=True)
@@ -273,6 +329,18 @@ def host() -> None:
     help="Certificate validity in days",
 )
 @click.option(
+    "--secrets-backend",
+    type=click.Choice(["sops", "1password"]),
+    default="sops",
+    show_default=True,
+    help="Store the host cert and key in a SOPS file or a 1Password item",
+)
+@click.option(
+    "--op-vault",
+    default=None,
+    help="1Password vault for the host item (with --secrets-backend 1password)",
+)
+@click.option(
     "--no-sops",
     is_flag=True,
     help="Skip creating SOPS-encrypted secrets file",
@@ -296,6 +364,8 @@ def host_onboard(
     region: str,
     profile: str | None,
     validity_days: int,
+    secrets_backend: SecretsBackend,
+    op_vault: str | None,
     no_sops: bool,
     sops_output: str | None,
     overwrite: bool,
@@ -304,7 +374,9 @@ def host_onboard(
     """Onboard a host to IAM Roles Anywhere.
 
     Generates a host certificate, stores it in Secrets Manager, and
-    optionally creates a SOPS-encrypted secrets file for Nix deployment.
+    optionally creates a SOPS-encrypted secrets file for Nix deployment,
+    or with --secrets-backend 1password a 1Password item
+    ("iam-ra-HOSTNAME-NAMESPACE") for the Nix module's certificate.keyRef.
 
     HOSTNAME is the identifier for this host (used in certificate CN).
 
@@ -319,7 +391,16 @@ def host_onboard(
       iam-ra host onboard webserver --role app --no-sops
       iam-ra host onboard mbp --role admin --role readonly --role deploy
       iam-ra host onboard mbp --role admin,readonly,deploy
+      iam-ra host onboard mbp --role admin --secrets-backend 1password --op-vault Private
     """
+    if secrets_backend == "1password":
+        if op_vault is None and not no_sops:
+            raise click.UsageError("--secrets-backend 1password requires --op-vault")
+        if sops_output is not None:
+            raise click.UsageError("--sops-output only applies to --secrets-backend sops")
+    elif op_vault is not None:
+        raise click.UsageError("--op-vault only applies to --secrets-backend 1password")
+
     # Expand comma-separated values inside each --role flag + dedupe while
     # preserving order.
     role_names: list[str] = []
@@ -348,12 +429,15 @@ def host_onboard(
         create_sops=not no_sops,
         sops_output_path=Path(sops_output) if sops_output else None,
         overwrite=overwrite,
+        op_vault=op_vault,
     )
 
     if not as_json:
         click.echo("[1/3] Generating host certificate...")
         click.echo("[2/3] Deploying host stack...")
-        if not no_sops:
+        if not no_sops and op_vault:
+            click.echo("[3/3] Storing certificate and key in 1Password...")
+        elif not no_sops:
             click.echo("[3/3] Creating SOPS secrets file...")
 
     result = handle_result(
