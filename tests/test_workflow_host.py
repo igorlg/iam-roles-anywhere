@@ -8,21 +8,26 @@ moto has limited support for the complex CloudFormation templates.
 """
 
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from moto import mock_aws
 
+from iam_ra_cli.lib import state as state_module
 from iam_ra_cli.lib.aws import AwsContext
 from iam_ra_cli.lib.errors import (
     CannotRemoveLastRoleError,
     CAScopeNotFoundError,
     HostNotFoundError,
     NotInitializedError,
+    OnePasswordError,
+    OnePasswordHostUnsupportedError,
     RoleNotFoundError,
     RoleScopeMismatchError,
 )
+from iam_ra_cli.lib.onepassword import OnePasswordItem
 from iam_ra_cli.lib.result import Err, Ok
 from iam_ra_cli.lib.sops import SopsProfile, SopsSecrets
 from iam_ra_cli.models import CA, Arn, CAMode, Host, Init, NamespaceInfo, Role, State
@@ -537,6 +542,68 @@ class TestOnboardAccountMismatch:
 
             # No namespace_info -> account check skipped, onboard succeeds
             assert isinstance(result, Ok)
+
+
+class TestOnboardOnePasswordBackend:
+    """op_vault set: cert + key go into a 1Password item instead of a SOPS
+    file, after the state save (like the SOPS file). Only `op` is faked."""
+
+    def _onboard(self, state: State, fake_op) -> tuple:
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            setup_state_in_aws(ctx, state)
+            host_result = replace(
+                MOCK_HOST_RESULT,
+                certificate_secret_arn=Arn(
+                    ctx.secrets.create_secret(Name="c", SecretString="CERT")["ARN"]
+                ),
+                private_key_secret_arn=Arn(
+                    ctx.secrets.create_secret(Name="k", SecretString="KEY")["ARN"]
+                ),
+            )
+            with (
+                patch(
+                    "iam_ra_cli.workflows.host.onboard_host_self_signed",
+                    return_value=Ok(host_result),
+                ),
+                patch("iam_ra_cli.workflows.host.create_secrets_file") as create_sops,
+            ):
+                result = onboard(
+                    ctx,
+                    OnboardConfig(
+                        namespace="test",
+                        hostname="myhost",
+                        role_names=("admin",),
+                        op_vault="Private",
+                    ),
+                )
+            create_sops.assert_not_called()
+            match state_module.load(ctx.ssm, ctx.s3, "test"):
+                case Ok(saved):
+                    assert saved is not None
+        return result, saved
+
+    def test_stores_in_onepassword_not_sops(
+        self, aws_credentials, temp_xdg_dirs, state_default_scope: State, fake_op
+    ) -> None:
+        result, saved = self._onboard(state_default_scope, fake_op)
+
+        assert isinstance(result, Ok)
+        assert result.value.onepassword_item == OnePasswordItem("Private", "iam-ra-myhost-test")
+        assert result.value.secrets_file is None
+        assert len(fake_op.creates) == 1
+        # Recorded so rotate-cert can refuse the host.
+        assert saved.hosts["myhost"].secrets_backend == "1password"
+
+    def test_existing_item_is_an_error(
+        self, aws_credentials, temp_xdg_dirs, state_default_scope: State, fake_op
+    ) -> None:
+        fake_op.items = [{"id": "abc", "title": "iam-ra-myhost-test"}]
+
+        result, _ = self._onboard(state_default_scope, fake_op)
+
+        assert isinstance(result, Err) and isinstance(result.error, OnePasswordError)
+        assert fake_op.creates == []
 
 
 class TestOnboardResultFields:
@@ -1448,3 +1515,21 @@ class TestRotateCertErrors:
 
             assert isinstance(result, Err)
             assert isinstance(result.error, NotInitializedError)
+
+
+class TestRotateCertOnePasswordHost:
+    """rotate-cert rewrites the SOPS file, so it refuses a host whose key
+    lives in 1Password (the item would go stale) before changing anything."""
+
+    def test_refused(self, aws_credentials, temp_xdg_dirs) -> None:
+        state = _state_with_existing_host(("admin",))
+        state.hosts["myhost"] = replace(state.hosts["myhost"], secrets_backend="1password")
+        with mock_aws():
+            ctx = AwsContext(region="ap-southeast-2")
+            _setup_state_in_s3(ctx, state)
+
+            result = rotate_cert(ctx, RotateCertConfig(namespace="test", hostname="myhost"))
+
+        assert result == Err(
+            OnePasswordHostUnsupportedError("test", "myhost", "host rotate-cert")
+        )

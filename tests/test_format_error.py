@@ -21,6 +21,8 @@ from iam_ra_cli.lib.errors import (
     K8sWorkloadAlreadyExistsError,
     K8sWorkloadNotFoundError,
     NotInitializedError,
+    OnePasswordError,
+    OnePasswordHostUnsupportedError,
     PCADescribeError,
     PCAGetCertError,
     PCAIssueCertError,
@@ -245,6 +247,16 @@ class TestFormatSecretsErrors:
         result = _format_error(error)
         assert "host.yaml" in result
         assert "already exists" in result
+
+    def test_onepassword_error(self) -> None:
+        result = _format_error(OnePasswordError("iam-ra-mbp-default", "not signed in"))
+        assert "'iam-ra-mbp-default'" in result
+        assert "not signed in" in result
+
+    def test_onepassword_host_unsupported_error(self) -> None:
+        result = _format_error(OnePasswordHostUnsupportedError("work", "mbp", "host rotate-cert"))
+        assert "Host 'mbp' (namespace 'work')" in result
+        assert "'host rotate-cert' only updates SOPS files" in result
 
 
 class TestFormatPCAErrors:
